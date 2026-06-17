@@ -1,94 +1,113 @@
 """
 =============================================================================
-全国公共资源交易平台（山西省）- 招标计划公告爬虫 配置文件
+全国公共资源交易平台（山西省）- 爬虫配置文件
 =============================================================================
 目标网站: https://prec.sxzwfw.gov.cn
-栏目路径: 交易信息 > 招标计划
-列表页URL: /jyxxzbjh/index.jhtml (第1页)
-分页URL:   /jyxxzbjh/index_{N}.jhtml (第N页, N>=2)
-详情页URL: /jyxxzbjh/{id}.jhtml
+栏目路径: 交易信息 > 工程建设 子栏目
+
+4个子栏目:
+  zbjh  - 招标计划
+  gczb  - 招标/资审公告
+  gchxr - 中标候选人公示
+  gcgs  - 中标结果公示
 
 说明:
   - 该站点无 robots.txt, 无需登录即可访问
   - 页面为服务端渲染(SSR) HTML, 非AJAX动态加载
-  - 列表按发布日期降序排列, 每页10条, 共约8922条/893页
-  1111
+  - 列表按发布日期降序排列, 每页10条
 =============================================================================
 """
 
 # ======================== 目标站点配置 ========================
 
 BASE_URL = "https://prec.sxzwfw.gov.cn"
-LIST_INDEX_URL = f"{BASE_URL}/jyxxzbjh/index.jhtml"  # 第1页
-LIST_PAGE_URL_TEMPLATE = f"{BASE_URL}/jyxxzbjh/index_{{page}}.jhtml"  # 第N页 (N>=2)
-DETAIL_URL_TEMPLATE = f"{BASE_URL}/jyxxzbjh/{{detail_id}}.jhtml"  # 详情页
-DETAIL_URL_PATTERN = r"/jyxxzbjh/(\d+)\.jhtml"  # 正则匹配详情链接
+
+# ---- 4个栏目的URL配置 ----
+# 每个栏目: (中文名称, 路径前缀, 列表详情正则片段, 输出JSON文件名)
+SECTION_DEFS = [
+    {
+        "key": "zbjh",
+        "name": "招标计划",
+        "path_prefix": "jyxxzbjh",
+        "output_json": "zbjh_招标计划.json",
+        "output_csv": "zbjh_招标计划.csv",
+    },
+    {
+        "key": "gczb",
+        "name": "招标资审公告",
+        "path_prefix": "jyxxgczb",
+        "output_json": "gczb_招标资审公告.json",
+        "output_csv": "gczb_招标资审公告.csv",
+    },
+    {
+        "key": "gchxr",
+        "name": "中标候选人公示",
+        "path_prefix": "jyxxgchxr",
+        "output_json": "gchxr_中标候选人公示.json",
+        "output_csv": "gchxr_中标候选人公示.csv",
+    },
+    {
+        "key": "gcgs",
+        "name": "中标结果公示",
+        "path_prefix": "jyxxgcgs",
+        "output_json": "gcgs_中标结果公示.json",
+        "output_csv": "gcgs_中标结果公示.csv",
+    },
+]
+
+# 辅助函数: 根据path_prefix生成URL
+def _list_index_url(path_prefix):
+    return f"{BASE_URL}/{path_prefix}/index.jhtml"
+
+def _list_page_url(path_prefix, page):
+    return f"{BASE_URL}/{path_prefix}/index_{page}.jhtml"
+
+def _detail_url(path_prefix, detail_id):
+    return f"{BASE_URL}/{path_prefix}/{detail_id}.jhtml"
+
+def _detail_pattern(path_prefix):
+    return rf"/{path_prefix}/(\d+)\.jhtml"
 
 # ======================== 爬取范围与日期过滤 ========================
 
-DAYS_LOOKBACK = 7  # 仅爬取最近N天的数据
-MAX_LIST_PAGES = 100  # 最多翻页数(安全上限, 防止无限循环)
+DAYS_LOOKBACK = 1  # 仅爬取最近N天的数据
+MAX_LIST_PAGES = 30  # 最多翻页数(安全上限)
 
 # ======================== 请求控制 ========================
 
-# 请求延迟(秒): 在 [MIN, MAX] 区间内随机取值, 模拟人类浏览行为
-REQUEST_DELAY_MIN = 2.0
-REQUEST_DELAY_MAX = 5.0
-
-# 列表页额外延迟: 翻页时额外等待
-PAGE_TRANSITION_DELAY = (3.0, 6.0)
-
-# 请求超时(秒)
+REQUEST_DELAY_MIN = 5.0   # 详情页之间最小延迟(秒)
+REQUEST_DELAY_MAX = 10.0  # 详情页之间最大延迟(秒)
+PAGE_TRANSITION_DELAY = (8.0, 15.0)  # 翻页延迟范围(秒)
+SECTION_COOLDOWN = (60.0, 120.0)  # 栏目间冷却间隔(秒)
 REQUEST_TIMEOUT = 30
-
-# 最大重试次数
 MAX_RETRIES = 3
-
-# 重试退避基数(秒): 第1次重试等 base, 第2次等 base*2, 第3次等 base*4
 RETRY_BACKOFF_BASE = 3
-
-# 代理切换阈值: 同一代理连续失败N次后自动剔除
 PROXY_MAX_FAILURES = 3
 
 # ======================== 代理配置 ========================
 
-# 代理池配置文件路径(每行一个代理: ip:port 或 ip:port:user:pass)
 PROXY_FILE = "proxies.txt"
-
-# 代理池最小可用数量
 PROXY_POOL_MIN_SIZE = 5
-
-# 代理池目标数量(从免费源补充到此数量)
 PROXY_POOL_TARGET_SIZE = 20
-
-# 代理验证超时(秒)
 PROXY_VALIDATE_TIMEOUT = 10
-
-# 代理验证目标URL(用目标站验证代理可达性)
 PROXY_VALIDATE_URL = BASE_URL
 
-# 免费代理API源(HTTP/HTTPS)
 FREE_PROXY_APIS = [
-    # ProxyScrape - 提供HTTP代理
-    "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=10000&country=all&ssl=all&anonymity=all",
-    # ProxyScrape - 提供HTTPS代理
-    "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=https&timeout=10000&country=all&ssl=all&anonymity=all",
+    # 89ip 免费代理 - 纯文本 ip:port 格式
+    "https://www.89ip.cn/tqdl.html?api=1&num=60",
+    # ip3366 云代理 - HTML表格格式
+    "http://proxy.ip3366.net/free/?action=china&page=1",
 ]
 
 # ======================== User-Agent 轮换池 ========================
 
 USER_AGENTS = [
-    # Chrome on Windows
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-    # Chrome on macOS
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-    # Firefox on Windows
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:127.0) Gecko/20100101 Firefox/127.0",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:126.0) Gecko/20100101 Firefox/126.0",
-    # Firefox on macOS
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:127.0) Gecko/20100101 Firefox/127.0",
-    # Edge on Windows
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 Edg/126.0.0.0",
 ]
 
@@ -103,13 +122,8 @@ BASE_HEADERS = {
     "Upgrade-Insecure-Requests": "1",
 }
 
-# ======================== 数据输出配置 ========================
-
-OUTPUT_JSON_FILE = "tender_plans_output.json"  # 默认输出JSON文件名
-OUTPUT_CSV_FILE = "tender_plans_output.csv"    # 可选CSV输出文件名
-
 # ======================== 日志配置 ========================
 
-LOG_LEVEL = "INFO"  # DEBUG | INFO | WARNING | ERROR
+LOG_LEVEL = "INFO"
 LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"

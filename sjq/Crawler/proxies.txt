@@ -7,16 +7,23 @@
 #
 # 以 # 开头的行为注释行, 会被忽略
 #
-# 获取代理IP的推荐渠道(付费):
+# 获取代理IP的推荐渠道(付费, 稳定):
 #   - 快代理:  https://www.kuaidaili.com
 #   - 芝麻代理: http://www.zhimaruanjian.com
 #   - 站大爷:  https://www.zdaye.com
 #
 # 使用说明:
-#   1. 将本文件中的示例代理替换为你自己的代理IP
+#   1. 将下面示例代理替换为你自己的代理IP
 #   2. 确保代理IP对目标站点 (prec.sxzwfw.gov.cn) 可达
 #   3. 建议至少配置 10-20 个代理IP
-#   4. 运行: python main.py --proxy-file proxies.txt
+#   4. 运行: python3 main.py --proxy-file proxies.txt --days 7
+#   5. 代理模式:   python3 main.py (默认就启用代理)
+#      直连模式:   python3 main.py --no-proxy (仅测试用)
+#
+# 代理模式工作流程:
+#   代码自动从 proxies.txt 加载 → 验证每个代理可达性 → 
+#   每次请求随机取一个代理 → 失败自动切换 → 失效代理自动剔除
+#   池中代理不足时自动从免费API补充(可通过 --no-free-proxy 关闭)
 # =============================================================================
 
 # === 示例(请替换为实际代理) ===

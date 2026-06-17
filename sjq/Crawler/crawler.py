@@ -1,25 +1,20 @@
 """
 =============================================================================
-全国公共资源交易平台（山西省）- 招标计划公告爬虫核心模块
+全国公共资源交易平台（山西省）- 爬虫核心模块
 =============================================================================
-负责:
-  - 列表页请求与解析(提取项目名称、交易场所、发布日期、详情URL)
-  - 详情页请求与解析(提取全部字段)
-  - 日期范围过滤(仅保留最近N天)
-  - 异常处理与重试
-  - 请求频率控制(随机延迟)
+支持4个栏目: 招标计划、招标资审公告、中标候选人公示、中标结果公示
 
-依赖: 仅需 requests (无需 bs4/lxml, 使用 stdlib re + html.parser)
+HTML页面结构(非zbjh栏目):
+  <div class="cs_xq_content">
+    <div class="div-title2">公告发布时间 / 公示发布时间</div>
+    <div class="div-article2">
+      <table class="gycq-table"><tr><td> ... 正文内容 ... </td></tr></table>
+    </div>
+  </div>
 
-数据流:
-  crawl()
-    → _crawl_list_pages()   逐页爬取列表
-      → _fetch_with_retry()  带重试的HTTP请求
-      → _parse_list_page()   解析列表页HTML
-    → _crawl_detail_page()  逐条爬取详情
-      → _fetch_with_retry()  带重试的HTTP请求
-      → _parse_detail_page() 解析详情页HTML
-    → 返回 List[Dict]       所有数据在内存中
+  发布日期 + 信息来源 在 cs_xq_content 上方, 以 &nbsp; 分隔
+
+依赖: 仅需 requests (stdlib re + html.parser)
 =============================================================================
 """
 
@@ -37,9 +32,7 @@ import requests
 
 from config import (
     BASE_URL,
-    LIST_INDEX_URL,
-    LIST_PAGE_URL_TEMPLATE,
-    DETAIL_URL_PATTERN,
+    SECTION_DEFS,
     DAYS_LOOKBACK,
     MAX_LIST_PAGES,
     REQUEST_DELAY_MIN,
@@ -50,62 +43,28 @@ from config import (
     RETRY_BACKOFF_BASE,
     USER_AGENTS,
     BASE_HEADERS,
+    _list_index_url,
+    _list_page_url,
+    _detail_url,
+    _detail_pattern,
 )
 from proxy_pool import ProxyPool
 
 logger = logging.getLogger(__name__)
 
 
-# ======================== 轻量级HTML解析器(仅用stdlib) ========================
-
-class LinkExtractor(HTMLParser):
-    """提取所有 <a> 标签及其href和文本内容."""
-
-    def __init__(self):
-        super().__init__()
-        self.links: List[Dict] = []  # [{"href": "...", "text": "..."}]
-
-    def handle_starttag(self, tag: str, attrs: List[Tuple[str, str]]):
-        if tag.lower() == "a":
-            href = ""
-            for name, value in attrs:
-                if name.lower() == "href":
-                    href = value
-                    break
-            self._current_href = href
-            self._current_text = ""
-
-    def handle_data(self, data: str):
-        if hasattr(self, "_current_text"):
-            self._current_text += data
-
-    def handle_endtag(self, tag: str):
-        if tag.lower() == "a" and hasattr(self, "_current_href"):
-            self.links.append({
-                "href": self._current_href,
-                "text": self._current_text.strip(),
-            })
-            del self._current_href
-            del self._current_text
-
+# ======================== HTML解析器 ========================
 
 class TableFieldExtractor(HTMLParser):
-    """从HTML表格中提取字段名-字段值对.
-
-    解析 <td> 元素, 匹配预定义的字段标签, 提取对应的值。
-    """
+    """从HTML表格中提取字段名-字段值对."""
 
     def __init__(self, field_label_map: Dict[str, str]):
-        """
-        Args:
-            field_label_map: {"标签文本": "字段key"} 映射
-        """
         super().__init__()
         self._field_labels = field_label_map
         self.result: Dict[str, str] = {}
         self._in_td = False
         self._td_text = ""
-        self._td_texts: List[str] = []  # 所有td的文本内容序列
+        self._td_texts: List[str] = []
 
     def handle_starttag(self, tag, attrs):
         if tag.lower() == "td":
@@ -120,25 +79,18 @@ class TableFieldExtractor(HTMLParser):
         if tag.lower() == "td":
             self._in_td = False
             clean = self._td_text.replace("**", "").replace("\u3000", " ").strip()
-            # 统一中文标点
             clean = clean.replace("\uff1a", ":").replace("\uff08", "(").replace("\uff09", ")")
-            # 规范化空白: 多个连续空格合并为一个
             clean = re.sub(r"\s{2,}", " ", clean)
             self._td_texts.append(clean)
 
     def extract(self):
-        """遍历td序列, 匹配标签并提取值."""
-        # 对于每个td, 检查是否匹配某个字段标签
         for i, td_text in enumerate(self._td_texts):
             for label, field_key in self._field_labels.items():
-                # 清理标签以便比较
                 clean_label = label.replace("\uff08", "(").replace("\uff09", ")").replace("\u3000", " ")
                 if clean_label in td_text:
-                    # 值在下一个td(或隔一个td, 有些表格有空列)
                     for offset in (1, 2):
                         if i + offset < len(self._td_texts):
                             val = self._td_texts[i + offset]
-                            # 排除值本身又是一个标签的情况
                             is_other_label = any(
                                 l in val for l in self._field_labels if l != label
                             )
@@ -149,26 +101,20 @@ class TableFieldExtractor(HTMLParser):
         return self.result
 
 
-# ======================== 主爬虫类 ========================
+# ======================== Section爬虫类 ========================
 
-class TenderCrawler:
-    """招标计划公告爬虫.
+class SectionCrawler:
+    """单个栏目的爬虫."""
 
-    使用方式:
-        pool = ProxyPool()
-        crawler = TenderCrawler(proxy_pool=pool)
-        results = crawler.crawl()
-        # results 是 List[Dict], 每个Dict包含一条招标计划的所有字段
-    """
-
-    def __init__(self, proxy_pool: ProxyPool = None):
-        """
-        Args:
-            proxy_pool: 代理池实例, 为None时使用直连模式(不推荐)
-        """
+    def __init__(self, section_def: Dict, proxy_pool: ProxyPool = None):
+        self.section = section_def
+        self.key = section_def["key"]
+        self.name = section_def["name"]
+        self.path_prefix = section_def["path_prefix"]
         self._proxy_pool = proxy_pool
         self._session = None
         self._stats = {
+            "section": self.name,
             "list_pages_crawled": 0,
             "detail_pages_crawled": 0,
             "detail_pages_failed": 0,
@@ -179,46 +125,42 @@ class TenderCrawler:
     # ======================== 公开接口 ========================
 
     def crawl(self) -> List[Dict]:
-        """执行爬取: 遍历列表页 → 收集详情URL → 逐条爬取详情.
-
-        Returns:
-            招标计划数据列表, 每个元素为包含所有字段的字典
-        """
         self._init_session()
-        cutoff_date = datetime.now() - timedelta(days=DAYS_LOOKBACK)
-        logger.info(f"开始爬取, 日期过滤: 最近 {DAYS_LOOKBACK} 天 (>= {cutoff_date.strftime('%Y-%m-%d')})")
+        cutoff_datetime = datetime.now() - timedelta(days=DAYS_LOOKBACK)
+        # 仅比较日期部分，忽略时分秒（列表页日期无时间）
+        cutoff_date = cutoff_datetime.date()
+        logger.info("[%s] 开始爬取, 日期过滤: >= %s", self.name,
+                     cutoff_date.isoformat())
 
         list_items = self._crawl_list_pages(cutoff_date)
-        logger.info(f"列表阶段完成: 收集到 {len(list_items)} 条在日期范围内的记录")
+        logger.info("[%s] 列表阶段完成: 收集到 %d 条", self.name, len(list_items))
 
         results = self._crawl_detail_pages(list_items)
-        logger.info(
-            f"详情阶段完成: 成功 {self._stats['detail_pages_crawled']} 条, "
-            f"失败 {self._stats['detail_pages_failed']} 条"
-        )
+        logger.info("[%s] 详情完成: 成功 %d 条, 失败 %d 条",
+                     self.name, self._stats["detail_pages_crawled"],
+                     self._stats["detail_pages_failed"])
 
-        logger.info(f"爬取结束: 总计 {len(results)} 条有效记录")
         self._print_stats()
         return results
 
     def stats(self) -> Dict:
-        """返回爬取统计信息."""
         return dict(self._stats)
 
-    # ======================== 第一阶段: 列表页爬取 ========================
+    # ======================== 列表页爬取 ========================
 
-    def _crawl_list_pages(self, cutoff_date: datetime) -> List[Dict]:
-        """逐页爬取列表, 收集详情条目."""
+    def _crawl_list_pages(self, cutoff_date) -> List[Dict]:
         items = []
-        stopped_by_date = False
-
+        list_index_url = _list_index_url(self.path_prefix)
         for page_num in range(1, MAX_LIST_PAGES + 1):
-            list_url = self._build_list_url(page_num)
-            logger.info(f"--- 列表第 {page_num} 页 ---")
+            list_url = _list_page_url(self.path_prefix, page_num) if page_num > 1 \
+                       else list_index_url
+            logger.info("[%s] --- 列表第 %d 页 ---", self.name, page_num)
 
-            html = self._fetch_with_retry(list_url, is_list_page=(page_num == 1))
+            # 第一页用首页作referer，后续页用上一页
+            ref = BASE_URL + "/" if page_num == 1 else _list_page_url(self.path_prefix, page_num - 1)
+            html = self._fetch_with_retry(list_url, referer=ref)
             if html is None:
-                logger.warning(f"列表第 {page_num} 页请求失败, 跳过")
+                logger.warning("[%s] 列表第 %d 页请求失败, 跳过", self.name, page_num)
                 continue
 
             self._stats["list_pages_crawled"] += 1
@@ -226,53 +168,21 @@ class TenderCrawler:
             items.extend(page_items)
 
             if page_has_old:
-                stopped_by_date = True
-                logger.info(f"日期过滤触发: 第 {page_num} 页存在 {DAYS_LOOKBACK} 天前的记录, 停止列表爬取")
+                logger.info("[%s] 日期过滤触发: 第 %d 页存在过期记录", self.name, page_num)
                 break
 
             if page_num < MAX_LIST_PAGES:
                 delay = random.uniform(*PAGE_TRANSITION_DELAY)
-                logger.debug(f"翻页等待 {delay:.1f}s...")
                 time.sleep(delay)
-
-        if not stopped_by_date and self._stats["list_pages_crawled"] >= MAX_LIST_PAGES:
-            logger.warning(f"已达到最大翻页限制 ({MAX_LIST_PAGES} 页), 可能未覆盖全部日期范围")
 
         return items
 
-    def _build_list_url(self, page_num: int) -> str:
-        """构造列表页URL: 第1页 index.jhtml, 第N页 index_N.jhtml."""
-        if page_num <= 1:
-            return LIST_INDEX_URL
-        return LIST_PAGE_URL_TEMPLATE.format(page=page_num)
-
-    def _parse_list_page(
-        self, html: str, cutoff_date: datetime
-    ) -> Tuple[List[Dict], bool]:
-        """解析列表页HTML, 提取项目条目.
-
-        列表页HTML结构 (每个条目是一个 <a> 标签):
-          <a href=".../jyxxzbjh/{id}.jhtml" ... class="cs_two_c_2">
-            <p class="cs_bz_cont">{项目名称}</p>
-            <p class="cs_bz_cont_1">
-              <span>交易场所：{地区}</span>
-              <span class="cs_bz_cont_1_time">{日期}</span>
-            </p>
-          </a>
-
-        Args:
-            html: 列表页HTML内容
-            cutoff_date: 日期下限
-
-        Returns:
-            (items列表, 是否遇到超出日期范围的记录)
-        """
+    def _parse_list_page(self, html: str, cutoff_date) -> Tuple[List[Dict], bool]:
         items = []
         found_old = False
 
-        # 匹配每个完整的 <a> 标签块: 从开幕到落幕
         a_block_pattern = re.compile(
-            r'<a\s+[^>]*href="[^"]*?/jyxxzbjh/(\d+)\.jhtml"[^>]*>'
+            rf'<a\s+[^>]*href="[^"]*?/{self.path_prefix}/(\d+)\.jhtml"[^>]*>'
             r'(.*?)'
             r'</a>',
             re.DOTALL | re.IGNORECASE,
@@ -280,342 +190,678 @@ class TenderCrawler:
 
         a_blocks = a_block_pattern.findall(html)
         if not a_blocks:
-            logger.warning("列表页未找到招标计划链接")
+            logger.warning("[%s] 列表页未找到链接", self.name)
             return items, found_old
 
         for detail_id, block_text in a_blocks:
-            # 提取项目名称 (第一个 <p class="cs_bz_cont">)
             name_match = re.search(
                 r'<p[^>]*class="cs_bz_cont"[^>]*>\s*(.*?)\s*</p>',
-                block_text,
-                re.DOTALL | re.IGNORECASE,
+                block_text, re.DOTALL | re.IGNORECASE,
             )
             title_text = html_unescape(name_match.group(1).strip()) if name_match else ""
 
-            # 提取交易场所
             place_match = re.search(
                 r'<span>\s*交易场所[：:]\s*([^<]+)\s*</span>',
-                block_text,
-                re.IGNORECASE,
+                block_text, re.IGNORECASE,
             )
             trading_place = place_match.group(1).strip() if place_match else ""
 
-            # 提取发布日期
             date_match = re.search(
                 r'<span[^>]*class="cs_bz_cont_1_time"[^>]*>\s*(\d{4}/\d{2}/\d{2})\s*</span>',
-                block_text,
-                re.IGNORECASE,
+                block_text, re.IGNORECASE,
             )
             publish_date_str = date_match.group(1) if date_match else ""
 
             if not title_text:
                 continue
 
-            # 日期过滤
             if publish_date_str:
                 try:
                     pub_date = datetime.strptime(
                         publish_date_str.replace("/", "-"), "%Y-%m-%d"
-                    )
+                    ).date()
                     if pub_date < cutoff_date:
-                        logger.debug(f"跳过过期: {title_text[:30]}... ({publish_date_str})")
                         found_old = True
                         self._stats["items_skipped_old"] += 1
                         continue
                 except ValueError:
-                    logger.debug(f"无法解析日期: {publish_date_str}")
+                    pass
 
-            detail_url = urljoin(BASE_URL, f"/jyxxzbjh/{detail_id}.jhtml")
+            detail_url = urljoin(BASE_URL, f"/{self.path_prefix}/{detail_id}.jhtml")
             items.append({
-                "detail_id": detail_id,
-                "detail_url": detail_url,
-                "project_name_list": title_text,
-                "trading_place": trading_place,
-                "publish_date_list": publish_date_str,
+                "详情ID": detail_id,
+                "详情页链接": detail_url,
+                "项目名称_列表": title_text,
+                "交易场所": trading_place,
+                "列表发布日期": publish_date_str,
             })
             self._stats["items_collected"] += 1
 
         return items, found_old
 
-    @staticmethod
-    def _parse_info_line(info_text: str) -> Tuple[str, str]:
-        """解析列表页信息行.
-
-        格式: "交易场所：运城市2026/06/17" → ("运城市", "2026/06/17")
-        """
-        trading_place = ""
-        publish_date = ""
-        if not info_text:
-            return trading_place, publish_date
-
-        text = info_text.replace("交易场所：", "").replace("交易场所:", "").strip()
-        date_match = re.search(r"(\d{4}/\d{2}/\d{2})\s*$", text)
-        if date_match:
-            publish_date = date_match.group(1)
-            trading_place = text[:date_match.start()].strip()
-
-        return trading_place, publish_date
-
-    # ======================== 第二阶段: 详情页爬取 ========================
+    # ======================== 详情页爬取 ========================
 
     def _crawl_detail_pages(self, list_items: List[Dict]) -> List[Dict]:
-        """逐条爬取详情页, 解析完整字段."""
         results = []
-
+        list_index_url = _list_index_url(self.path_prefix)
         for idx, item in enumerate(list_items):
-            detail_url = item["detail_url"]
-            detail_id = item["detail_id"]
+            detail_url = item["详情页链接"]
+            detail_id = item["详情ID"]
+            logger.info("[%s] [%d/%d] 爬取详情: %s - %s",
+                         self.name, idx + 1, len(list_items),
+                         detail_id, item.get("项目名称_列表", "未知")[:40])
 
-            logger.info(
-                f"[{idx + 1}/{len(list_items)}] 爬取详情: {detail_id} - "
-                f"{item.get('project_name_list', '未知')[:40]}..."
-            )
-
-            html = self._fetch_with_retry(detail_url, is_list_page=False)
+            # 用栏目首页作referer，模拟从列表页点进去
+            html = self._fetch_with_retry(detail_url, referer=list_index_url)
             if html is None:
-                logger.warning(f"详情页请求失败: {detail_url}")
+                logger.warning("[%s] 详情页请求失败: %s", self.name, detail_url)
                 self._stats["detail_pages_failed"] += 1
                 continue
 
             self._stats["detail_pages_crawled"] += 1
 
             try:
-                detail_data = self._parse_detail_page(html, detail_url)
-                detail_data["trading_place"] = item.get("trading_place", "")
-                detail_data["publish_date_list"] = item.get("publish_date_list", "")
+                detail_data = self._parse_detail(html, detail_url, detail_id)
+                detail_data["交易场所"] = item.get("交易场所", "")
+                detail_data["列表发布日期"] = item.get("列表发布日期", "")
                 results.append(detail_data)
             except Exception as e:
-                logger.error(f"详情解析失败 ({detail_url}): {e}")
+                logger.error("[%s] 详情解析失败: %s", self.name, e)
                 self._stats["detail_pages_failed"] += 1
                 continue
 
             if idx < len(list_items) - 1:
                 delay = random.uniform(REQUEST_DELAY_MIN, REQUEST_DELAY_MAX)
-                logger.debug(f"请求间隔 {delay:.1f}s...")
                 time.sleep(delay)
 
         return results
 
-    def _parse_detail_page(self, html: str, detail_url: str) -> Dict:
-        """解析详情页HTML, 提取全部字段.
+    def _parse_detail(self, html: str, detail_url: str, detail_id: str) -> Dict:
+        if self.key == "zbjh":
+            return self._parse_detail_zbjh(html, detail_url, detail_id)
+        elif self.key == "gczb":
+            return self._parse_detail_gczb(html, detail_url, detail_id)
+        elif self.key == "gchxr":
+            return self._parse_detail_gchxr(html, detail_url, detail_id)
+        elif self.key == "gcgs":
+            return self._parse_detail_gcgs(html, detail_url, detail_id)
+        return {"详情页链接": detail_url, "详情ID": detail_id}
 
-        详情页结构:
-          - 标题元素包含项目名称
-          - 时间文本显示发布时间 (YYYY-MM-DD HH:MM:SS)
-          - HTML表格: <td>标签含字段名</td><td>字段值</td>
+    # ======================== 共享内容提取 ========================
 
-        使用 stdlib HTMLParser 解析表格, 无需 BeautifulSoup。
+    @staticmethod
+    def _extract_publish_info(html: str) -> Dict[str, str]:
+        """提取 cs_xq_content 上方的 发布日期 和 信息来源.
+
+        格式: 发布日期：2026-06-17 18:20 &nbsp;&nbsp;...&nbsp;&nbsp;信息来源：xxx
         """
-        # 初始化结果字典
+        result = {"发布时间": "", "信息来源": ""}
+
+        # 发布日期: 先找到 cs_xq_content 之前的"发布日期"行
+        cs_pos = html.find("cs_xq_content")
+        if cs_pos < 0:
+            cs_pos = len(html)
+
+        before_content = html[:cs_pos]
+        # 发布日期 + 空格/&nbsp; + 信息来源 可能在同一个闭合tag内
+        # 用 DOTALL 匹配跨 HTML 标签
+        pub_match = re.search(
+            r"发布日期[：:]\s*(\d{4}[-/]\d{2}[-/]\d{2}\s+\d{2}:\d{2}(?::\d{2})?)",
+            before_content, re.DOTALL,
+        )
+        if pub_match:
+            result["发布时间"] = pub_match.group(1).replace("/", "-")
+
+        # 信息来源: 单独匹配, 可能在 &nbsp; 后面
+        info_match = re.search(
+            r"信息来源[：:]\s*([^<&]+)",
+            before_content, re.DOTALL,
+        )
+        if info_match:
+            result["信息来源"] = info_match.group(1).strip()
+            # 清理可能的 &nbsp;
+            result["信息来源"] = re.sub(r"&nbsp;", "", result["信息来源"]).strip()
+
+        return result
+
+    @staticmethod
+    def _extract_title_from_content(html: str) -> str:
+        """从 div-article2 中提取项目名称(居中的h1或p标签)."""
+        cs_start = html.find("cs_xq_content")
+        if cs_start < 0:
+            return ""
+        content_html = html[cs_start:]
+
+        # 方法1: 找 h1 (gchxr用)
+        h1_match = re.search(
+            r"<h1[^>]*>\s*(.*?)\s*</h1>",
+            content_html, re.DOTALL | re.IGNORECASE,
+        )
+        if h1_match:
+            title = re.sub(r"<[^>]+>", "", h1_match.group(1)).strip()
+            if title and len(title) > 4:
+                return title
+
+        # 方法2: 找 style="text-align: center; font-size: 18px" 的 p (gczb用)
+        p_match = re.search(
+            r'<p[^>]*text-align:\s*center[^>]*font-size:\s*1[68]px[^>]*>\s*(.*?)\s*</p>',
+            content_html, re.DOTALL | re.IGNORECASE,
+        )
+        if p_match:
+            title = re.sub(r"<[^>]+>", "", p_match.group(1)).strip()
+            if title and len(title) > 4:
+                return title
+
+        # 方法3: 从纯文本中提取 - 找第一条有意义行(适用于gcgs等嵌入式HTML)
+        ctext = SectionCrawler._extract_content_text(html)
+        # 去除开头残留 "cs_xq_content">"
+        ctext = re.sub(r'^\s*cs_xq_content[^>]*>\s*', '', ctext)
+        ctext = ctext.strip()
+        lines = [l.strip() for l in ctext.split("\n") if l.strip()]
+        for line in lines:
+            # 跳过日期/时间/编号/空行
+            if re.match(r'^[\d\s\-/:]+$', line):
+                continue
+            if re.match(r'^[（(]?招标编号', line):
+                continue
+            if re.match(r'^公示发布时间', line):
+                continue
+            if re.match(r'^公告发布时间', line):
+                continue
+            if len(line) > 5:
+                return line[:200]
+        return ""
+
+    @staticmethod
+    def _extract_content_text(html: str) -> str:
+        """从 cs_xq_content > div-article2 提取正文纯文本.
+
+        只提取内容区域, 避免页面头尾的 JS/CSS 垃圾。
+        """
+        # 找到 cs_xq_content 位置
+        cs_start = html.find("cs_xq_content")
+        if cs_start < 0:
+            # fallback: 整页
+            body = re.sub(r"<[^>]+>", " ", html)
+            body = html_unescape(body)
+            body = re.sub(r"\s{3,}", "\n", body)
+            return body.strip()[:10000]
+
+        # 从 cs_xq_content 开始
+        after_cs = html[cs_start:]
+
+        # 找到 div-article2 内容结束点(下一个大的结构边界)
+        # 结束标记: 页面 footer 或 script 块
+        end_markers = [
+            r'山西省行政审批服务管理局',
+            r'投诉举报热线',
+            r'备案号：晋ICP备',
+        ]
+        end_pos = len(after_cs)
+        for marker in end_markers:
+            pos = after_cs.find(marker)
+            if 0 < pos < end_pos:
+                end_pos = pos
+
+        content_html = after_cs[:end_pos]
+
+        # 去除HTML标签
+        text = re.sub(r"<script[^>]*>.*?</script>", " ", content_html,
+                      flags=re.DOTALL | re.IGNORECASE)
+        text = re.sub(r"<style[^>]*>.*?</style>", " ", text,
+                      flags=re.DOTALL | re.IGNORECASE)
+        text = re.sub(r"<[^>]+>", " ", text)
+        text = html_unescape(text)
+
+        # 规范化空白
+        text = re.sub(r"&nbsp;", " ", text)
+        text = re.sub(r"[ \t]{2,}", " ", text)
+        text = re.sub(r"\n{3,}", "\n\n", text)
+
+        # 去除开头 "cs_xq_content">" 等 div 标签残留
+        text = re.sub(r'^\s*cs_xq_content[^>]*>\s*', '', text)
+        text = re.sub(r'^\s*div-title2[^>]*>\s*', '', text)
+        text = text.strip()
+        # 移除过多连续空行
+        text = re.sub(r'\n\s*\n\s*\n+', '\n\n', text)
+
+        return text[:10000]
+
+    @staticmethod
+    def _extract_from_body_text(body_text: str, label_pattern: str) -> str:
+        """从正文纯文本中用标签模式提取字段值（fallback）。
+
+        label_pattern: 如 r'招标编号[：:]' 或 r'招\s*标\s*人[：:]'
+        返回标签后到下一个字段边界前的值。
+        """
+        # 边界: 下一字段标签 或 句号 或 双换行 或 字符串末尾
+        boundary = r'(?:地\s*址|电\s*话|联\s*系|电子邮|项目名|招标项|招标方|招标代|监督部|联系方|办\s*公|传\s*真|邮\s*编|邮\s*箱|开标时|中标人|中标价|。|\n\s*\n|$)'
+
+        m = re.search(
+            label_pattern + r'\s*(.{1,200}?)' + boundary,
+            body_text, re.DOTALL,
+        )
+        if m:
+            val = m.group(1).strip()
+            # 清理尾部标点和空白
+            val = re.sub(r'[\s）\)。．，,、;；]+$', '', val).strip()
+            # 清理前导
+            val = re.sub(r'^[：:为]\s*', '', val)
+            if val and len(val) >= 2 and not re.match(r'^[\s或、，。．,（(）)]+$', val):
+                return val[:200]
+        return ""
+
+    # ===== 栏目1: 招标计划 (zbjh) =====
+
+    def _parse_detail_zbjh(self, html: str, detail_url: str, detail_id: str) -> Dict:
+        """招标计划: 表格字段为主."""
         result = {
-            "detail_url": detail_url,
-            "detail_id": "",
-            "project_name": "",
-            "project_code": "",
-            "project_type": "",
-            "total_investment": "",
-            "bid_content": "",
-            "bid_method": "",
-            "bidder_name": "",
-            "supervision_dept": "",
-            "publish_type": "",
-            "publish_unit": "",
-            "construction_site": "",
-            "construction_scale": "",
-            "expected_publish_date": "",
-            "publish_time": "",
-            "trading_place": "",
-            "publish_date_list": "",
+            "详情页链接": detail_url, "详情ID": detail_id,
+            "项目名称": "", "投资项目统一代码": "", "项目类型": "",
+            "项目总投资": "", "项目总投资原始文本": "", "招标内容": "",
+            "招标方式": "", "招标人名称": "", "行政监督部门": "",
+            "发布类型": "", "发布单位": "", "建设地点": "",
+            "建设内容及规模": "", "招标公告预计发布时间": "",
+            "发布时间": "", "交易场所": "", "列表发布日期": "",
         }
 
-        # detail_id from URL
-        id_match = re.search(DETAIL_URL_PATTERN, detail_url)
-        if id_match:
-            result["detail_id"] = id_match.group(1)
-
-        # ---- 1. 提取项目名称 ----
-        # 从 <title> 标签提取
+        # 标题: 从title标签提取(去"山西省公共资源交易平台"后缀)
         title_match = re.search(r"<title[^>]*>(.*?)</title>", html, re.DOTALL | re.IGNORECASE)
         if title_match:
             title = html_unescape(title_match.group(1).strip())
-            # 标题通常格式: "项目名称" 或 "xxx - 项目名称"
-            if "山西省公共资源交易" not in title and len(title) > 2:
-                result["project_name"] = title
+            title = re.sub(r"[-–—|]*\s*山西省公共资源交易平台\s*[-–—|]*", "", title).strip()
+            if title and len(title) > 2:
+                result["项目名称"] = title
 
-        # ---- 2. 提取发布时间 ----
-        # 格式: "发布日期：2026-06-17 16:10" (可能带秒或不带秒)
-        time_match = re.search(
-            r"发布日期[：:]\s*(\d{4}[-/]\d{2}[-/]\d{2}\s+\d{2}:\d{2}(?::\d{2})?)",
-            html,
-        )
-        if time_match:
-            result["publish_time"] = time_match.group(1).replace("/", "-")
+        # 发布时间
+        pub_info = self._extract_publish_info(html)
+        if pub_info["发布时间"]:
+            result["发布时间"] = pub_info["发布时间"]
 
-        # ---- 3. 提取表格字段 ----
         field_label_map = {
-            "投资项目统一代码": "project_code",
-            "项目名称": "project_name",
-            "项目类型": "project_type",
-            "项目总投资": "total_investment",
-            "招标内容": "bid_content",
-            "招标方式": "bid_method",
-            "招标人名称": "bidder_name",
-            "行政监督部门": "supervision_dept",
-            "发布类型": "publish_type",
-            "发布单位": "publish_unit",
-            "建设地点": "construction_site",
-            "建设内容及规模": "construction_scale",
-            "招标公告（资格预审公告） 预计发布时间": "expected_publish_date",
-            "招标公告（资格预审公告）预计发布时间": "expected_publish_date",
-            "招标公告(资格预审公告) 预计发布时间": "expected_publish_date",
-            "招标公告(资格预审公告)预计发布时间": "expected_publish_date",
-            "招标公告预计发布时间": "expected_publish_date",
+            "投资项目统一代码": "投资项目统一代码",
+            "项目名称": "项目名称",
+            "项目类型": "项目类型",
+            "项目总投资": "项目总投资",
+            "招标内容": "招标内容",
+            "招标方式": "招标方式",
+            "招标人名称": "招标人名称",
+            "行政监督部门": "行政监督部门",
+            "发布类型": "发布类型",
+            "发布单位": "发布单位",
+            "建设地点": "建设地点",
+            "建设内容及规模": "建设内容及规模",
+            "招标公告（资格预审公告） 预计发布时间": "招标公告预计发布时间",
+            "招标公告（资格预审公告）预计发布时间": "招标公告预计发布时间",
+            "招标公告(资格预审公告) 预计发布时间": "招标公告预计发布时间",
+            "招标公告(资格预审公告)预计发布时间": "招标公告预计发布时间",
+            "招标公告预计发布时间": "招标公告预计发布时间",
         }
 
-        # 方法A: 使用 TableFieldExtractor 解析
         extractor = TableFieldExtractor(field_label_map)
         try:
             extractor.feed(html)
             table_data = extractor.extract()
-            for key, value in table_data.items():
-                result[key] = html_unescape(value)
-        except Exception as e:
-            logger.debug(f"TableFieldExtractor 解析异常: {e}")
+            for k, v in table_data.items():
+                result[k] = html_unescape(v)
+        except Exception:
+            pass
 
-        # 方法B: 正则fallback - 直接匹配 <td>标签</td><td>值</td> 模式
-        # 适用于 TableFieldExtractor 解析不完全的情况
-        if not result.get("project_name") or not result.get("bidder_name"):
-            self._parse_detail_page_regex_fallback(html, result, field_label_map)
+        # fallback regex
+        if not result.get("项目名称"):
+            self._regex_fallback(html, result, field_label_map)
 
-        # ---- 4. 数据清洗 ----
-        result = self._clean_detail_data(result)
-        return result
+        return self._clean_common(result)
+
+    # ===== 栏目2: 招标/资审公告 (gczb) =====
+
+    def _parse_detail_gczb(self, html: str, detail_url: str, detail_id: str) -> Dict:
+        """招标/资审公告."""
+        result = {
+            "详情页链接": detail_url, "详情ID": detail_id,
+            "项目名称": "", "招标编号": "", "发布时间": "",
+            "公告发布时间": "", "信息来源": "", "招标项目所在地区": "",
+            "监督部门": "", "招标人": "", "招标代理": "",
+            "全文文本": "", "交易场所": "", "列表发布日期": "",
+        }
+
+        # 标题
+        result["项目名称"] = self._extract_title_from_content(html)
+
+        # 发布时间 + 信息来源
+        pub_info = self._extract_publish_info(html)
+        result["发布时间"] = pub_info["发布时间"]
+        result["信息来源"] = pub_info["信息来源"]
+
+        # 公告发布时间
+        ann_match = re.search(
+            r"公告发布时间[：:]\s*(\d{4}[-/]\d{2}[-/]\d{2}\s+\d{2}:\d{2}(?::\d{2})?)",
+            html, re.DOTALL,
+        )
+        if ann_match:
+            result["公告发布时间"] = ann_match.group(1).replace("/", "-")
+
+        # 招标编号
+        bh_match = re.search(
+            r"招标编号[：:]\s*([^\n<)]+)[)]",
+            html, re.DOTALL,
+        )
+        if bh_match:
+            result["招标编号"] = bh_match.group(1).strip()
+
+        # 招标项目所在地区
+        area_match = re.search(
+            r"招标项目所在地区[：:]\s*([^\n<]+)",
+            html, re.DOTALL,
+        )
+        if area_match:
+            result["招标项目所在地区"] = area_match.group(1).strip()
+
+        # 全文文本
+        body_text = self._extract_content_text(html)
+        result["全文文本"] = body_text
+
+        # === 从全文文本 fallback 提取 ===
+        if not result["项目名称"]:
+            result["项目名称"] = self._extract_title_from_content(html)
+        if not result["招标编号"]:
+            result["招标编号"] = self._extract_from_body_text(
+                body_text, r'招标编号[：:]'
+            )
+        if not result["招标项目所在地区"]:
+            result["招标项目所在地区"] = self._extract_from_body_text(
+                body_text, r'招标项目所在地区[：:]'
+            )
+
+        # 监督部门 / 招标人 / 招标代理 — 统一从正文提取(替换HTML提取)
+        result["监督部门"] = self._extract_from_body_text(
+            body_text, r'监督部门[：:为]'
+        )
+        result["招标人"] = self._extract_from_body_text(body_text, r'招\s*标\s*人[：:为]')
+        # 清理紧凑文本中的 ",招标代理机构为..." 等后续内容
+        if result["招标人"]:
+            result["招标人"] = re.split(r'[,，]\s*招\s*标\s*代', result["招标人"])[0].strip()
+        result["招标代理"] = self._extract_from_body_text(
+            body_text, r'(?:招标代理|代理机构)[：:为]'
+        )
+
+        return self._clean_common(result)
+
+    # ===== 栏目3: 中标候选人公示 (gchxr) =====
+
+    def _parse_detail_gchxr(self, html: str, detail_url: str, detail_id: str) -> Dict:
+        """中标候选人公示."""
+        result = {
+            "详情页链接": detail_url, "详情ID": detail_id,
+            "项目名称": "", "招标编号": "", "发布时间": "",
+            "公示发布时间": "", "信息来源": "",
+            "公示开始时间": "", "公示结束时间": "",
+            "中标候选人表格": "", "监督部门": "",
+            "招标人": "", "招标代理": "",
+            "全文文本": "", "交易场所": "", "列表发布日期": "",
+        }
+
+        # 标题
+        result["项目名称"] = self._extract_title_from_content(html)
+
+        # 发布时间 + 信息来源
+        pub_info = self._extract_publish_info(html)
+        result["发布时间"] = pub_info["发布时间"]
+        result["信息来源"] = pub_info["信息来源"]
+
+        # 公示发布时间
+        ann_match = re.search(
+            r"公示发布时间[：:]\s*(\d{4}[-/]\d{2}[-/]\d{2}\s+\d{2}:\d{2}(?::\d{2})?)",
+            html, re.DOTALL,
+        )
+        if ann_match:
+            result["公示发布时间"] = ann_match.group(1).replace("/", "-")
+
+        # 公示时间范围 (HTML优先)
+        start_match = re.search(
+            r"公示开始时间[：:]\s*(\d{4}[年/-]\d{1,2}[月/-]\d{1,2}[\s\d:时]+)",
+            html, re.DOTALL,
+        )
+        if start_match:
+            result["公示开始时间"] = start_match.group(1).strip()
+        end_match = re.search(
+            r"公示结束时间[：:]\s*(\d{4}[年/-]\d{1,2}[月/-]\d{1,2}[\s\d:时]+)",
+            html, re.DOTALL,
+        )
+        if end_match:
+            result["公示结束时间"] = end_match.group(1).strip()
+
+        # 招标编号 (h2 优先)
+        h2_match = re.search(
+            r"<h2[^>]*>\s*(?:（|\(?)\s*招标编号[：:]\s*([^）)]+)[）)]?\s*</h2>",
+            html, re.DOTALL | re.IGNORECASE,
+        )
+        if h2_match:
+            result["招标编号"] = h2_match.group(1).strip()
+        else:
+            bh_match = re.search(
+                r"招标编号[：:]\s*([^\n<)]+)[)]",
+                html, re.DOTALL,
+            )
+            if bh_match:
+                result["招标编号"] = bh_match.group(1).strip()
+
+        # 全文文本
+        body_text = self._extract_content_text(html)
+        result["全文文本"] = body_text
+
+        # 候选人表格
+        table_match = re.search(
+            r"(?:中标候选人基本情况|中标候选人名称)(.*?)(?:提出异议|二[、.]\s*提出|$)",
+            body_text, re.DOTALL,
+        )
+        if table_match:
+            table_text = table_match.group(0).strip()
+            result["中标候选人表格"] = table_text[:3000]
+
+        # === 从全文文本 fallback ===
+        if not result["项目名称"]:
+            result["项目名称"] = self._extract_from_body_text(
+                body_text, r'(?:项目名称|项目编号)[：:]'
+            )
+            if not result["项目名称"]:
+                result["项目名称"] = self._extract_title_from_content(html)
+
+        if not result["招标编号"]:
+            result["招标编号"] = self._extract_from_body_text(body_text, r'招标编号[：:]')
+
+        if not result["公示开始时间"] and not result["公示结束时间"]:
+            start2 = re.search(
+                r"公示开始时间[：:]\s*(\d{4}[年/-]\d{1,2}[月/-]\d{1,2}[\s\d:时]+)",
+                body_text,
+            )
+            if start2:
+                result["公示开始时间"] = start2.group(1).strip()
+            end2 = re.search(
+                r"公示结束时间[：:]\s*(\d{4}[年/-]\d{1,2}[月/-]\d{1,2}[\s\d:时]+)",
+                body_text,
+            )
+            if end2:
+                result["公示结束时间"] = end2.group(1).strip()
+
+        # 公示期限 (另一种格式)
+        if not result["公示开始时间"]:
+            qx = re.search(r"公示期限[：:]\s*(\d{4}[年/-]\d{1,2}[月/-]\d{1,2}[\s\d:时]+)", body_text)
+            if qx:
+                result["公示开始时间"] = qx.group(1).strip()
+
+        # 监督部门 / 招标人 / 招标代理 — 全部从正文提取
+        result["监督部门"] = self._extract_from_body_text(
+            body_text, r'(?:监督部门|项目监督人)[：:为]'
+        )
+        result["招标人"] = self._extract_from_body_text(body_text, r'招\s*标\s*人[：:为]')
+        # 招标代理也可能是"代理机构"
+        result["招标代理"] = self._extract_from_body_text(
+            body_text, r'(?:招标代理[机构]*|代理机构)[：:为]'
+        )
+
+        return self._clean_common(result)
+
+    # ===== 栏目4: 中标结果公示 (gcgs) =====
+
+    def _parse_detail_gcgs(self, html: str, detail_url: str, detail_id: str) -> Dict:
+        """中标结果公示."""
+        result = {
+            "详情页链接": detail_url, "详情ID": detail_id,
+            "项目名称": "", "招标编号": "", "发布时间": "",
+            "公示发布时间": "", "中标人": "", "中标价格": "",
+            "中标价格单位": "", "监督部门": "", "招标人": "", "招标代理": "",
+            "全文文本": "", "交易场所": "", "列表发布日期": "", "信息来源": "",
+        }
+
+        # 标题
+        result["项目名称"] = self._extract_title_from_content(html)
+
+        # 发布时间 + 信息来源
+        pub_info = self._extract_publish_info(html)
+        result["发布时间"] = pub_info["发布时间"]
+        result["信息来源"] = pub_info["信息来源"]
+
+        # 公示发布时间
+        ann_match = re.search(
+            r"公示发布时间[：:]\s*(\d{4}[-/]\d{2}[-/]\d{2}\s+\d{2}:\d{2}(?::\d{2})?)",
+            html, re.DOTALL,
+        )
+        if ann_match:
+            result["公示发布时间"] = ann_match.group(1).replace("/", "-")
+
+        # 全文文本
+        body_text = self._extract_content_text(html)
+        result["全文文本"] = body_text
+
+        # === 所有业务字段从全文文本提取 ===
+        if not result["项目名称"]:
+            result["项目名称"] = self._extract_title_from_content(html)
+
+        result["招标编号"] = self._extract_from_body_text(body_text, r'招标编号[：:]')
+        if not result["招标编号"]:
+            # 尝试 项目编号
+            result["招标编号"] = self._extract_from_body_text(body_text, r'项目编号[：:]')
+
+        # 中标人
+        result["中标人"] = self._extract_from_body_text(body_text, r'中标人[：:]')
+        if not result["中标人"]:
+            # "选定XXX为该项目的中标人"
+            zbr_fallback = re.search(
+                r'选定\s*(\S{2,50}?)\s*为该项目的中标人',
+                body_text,
+            )
+            if zbr_fallback:
+                result["中标人"] = zbr_fallback.group(1).strip()
+
+        # 中标价格
+        price_match = re.search(
+            r'(?:中标价格|投标报价)[：:]\s*([\d,.]+\s*(?:万元|元)?)',
+            body_text,
+        )
+        if price_match:
+            pv = price_match.group(1).strip()
+            if re.search(r'万元', pv):
+                result["中标价格"] = re.sub(r'\s*万元', '', pv).strip()
+                result["中标价格单位"] = "万元"
+            elif re.search(r'元', pv) and not re.search(r'万元', pv):
+                result["中标价格"] = re.sub(r'\s*元', '', pv).strip()
+                result["中标价格单位"] = "元"
+            else:
+                result["中标价格"] = pv
+
+        # 监督部门 / 招标人 / 招标代理
+        result["监督部门"] = self._extract_from_body_text(
+            body_text, r'(?:监督部门|本招标项目的监督部门)[：:为]'
+        )
+        result["招标人"] = self._extract_from_body_text(body_text, r'招\s*标\s*人[：:为]')
+        result["招标代理"] = self._extract_from_body_text(
+            body_text, r'(?:招标代理|代理机构)[：:为]'
+        )
+
+        return self._clean_common(result)
+
+    # ======================== 辅助 ========================
 
     @staticmethod
-    def _parse_detail_page_regex_fallback(
-        html: str, result: Dict, field_label_map: Dict[str, str]
-    ):
-        """正则fallback: 直接匹配 HTML 标签模式提取字段.
-
-        匹配模式: <td ...>标签名</td><td ...>值</td>
-        """
-        # 提取所有 <td> 内容及其位置
-        td_pattern = re.compile(
-            r"<td[^>]*>(.*?)</td>", re.DOTALL | re.IGNORECASE
-        )
+    def _regex_fallback(html: str, result: Dict, field_label_map: Dict[str, str]):
+        td_pattern = re.compile(r"<td[^>]*>(.*?)</td>", re.DOTALL | re.IGNORECASE)
         tds = td_pattern.findall(html)
-        # 清理每个td内容: 去除HTML标签和多余空白
-        def clean_td(text: str) -> str:
-            # 去除嵌套HTML标签
-            clean = re.sub(r"<[^>]+>", "", text)
-            # 解码HTML实体
-            clean = html_unescape(clean)
-            # 统一中文标点
-            clean = clean.replace("\uff1a", ":").replace("\uff08", "(").replace("\uff09", ")")
-            clean = clean.replace("**", "").replace("\u3000", " ").strip()
-            # 规范化空白
-            clean = re.sub(r"\s{2,}", " ", clean)
-            return clean
 
-        cleaned_tds = [clean_td(t) for t in tds]
+        def clean_td(t):
+            c = re.sub(r"<[^>]+>", "", t)
+            c = html_unescape(c)
+            c = c.replace("\uff1a", ":").replace("\uff08", "(").replace("\uff09", ")")
+            c = c.replace("**", "").replace("\u3000", " ").strip()
+            return re.sub(r"\s{2,}", " ", c)
 
-        # 匹配标签-值对
-        already_filled = {k for k, v in result.items() if v}
-        for i, td_text in enumerate(cleaned_tds):
+        cleaned = [clean_td(t) for t in tds]
+        already = {k for k, v in result.items() if v}
+        for i, td_text in enumerate(cleaned):
             for label, field_key in field_label_map.items():
-                if field_key in already_filled:
+                if field_key in already:
                     continue
-                clean_label = label.replace("\uff08", "(").replace("\uff09", ")").replace("\u3000", " ")
-                if clean_label in td_text:
+                cl = label.replace("\uff08", "(").replace("\uff09", ")").replace("\u3000", " ")
+                if cl in td_text:
                     for offset in (1, 2):
-                        if i + offset < len(cleaned_tds):
-                            val = cleaned_tds[i + offset]
-                            # 排除值为其他标签的情况
+                        if i + offset < len(cleaned):
+                            val = cleaned[i + offset]
                             is_label = any(
                                 l.replace("\uff08", "(").replace("\uff09", ")") in val
                                 for l in field_label_map if l != label
                             )
                             if val and not is_label:
                                 result[field_key] = html_unescape(val)
-                                already_filled.add(field_key)
+                                already.add(field_key)
                                 break
                     break
 
     @staticmethod
-    def _clean_detail_data(data: Dict) -> Dict:
-        """清洗详情数据: 去除多余空白, 统一日期格式, 处理特殊字符."""
+    def _clean_common(data: Dict) -> Dict:
         for key in data:
             if isinstance(data[key], str):
                 value = data[key].strip()
                 value = re.sub(r"[ \t]+", " ", value)
                 value = re.sub(r"\n{3,}", "\n\n", value)
                 data[key] = value
-
-        # 总投资: 提取数值部分
-        investment = data.get("total_investment", "")
-        if investment:
-            num_match = re.search(r"[\d.]+", investment)
-            if num_match:
-                data["total_investment_raw"] = investment
-                data["total_investment"] = num_match.group(0)
-
-        # 统一发布时间格式 (支持 YYYY-MM-DD HH:MM 和 YYYY-MM-DD HH:MM:SS)
-        publish_time = data.get("publish_time", "")
-        if publish_time:
-            for fmt in ["%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y/%m/%d %H:%M:%S", "%Y/%m/%d %H:%M"]:
-                try:
-                    dt = datetime.strptime(publish_time, fmt)
-                    data["publish_time"] = dt.strftime("%Y-%m-%d %H:%M:%S")
-                    break
-                except ValueError:
-                    continue
-
         return data
 
-    # ======================== HTTP请求与重试 ========================
+    # ======================== HTTP ========================
 
     def _init_session(self):
-        """初始化HTTP会话."""
         self._session = requests.Session()
+        # 会话预热: 先访问首页，建立正常浏览会话痕迹
+        try:
+            headers = self._build_headers(BASE_URL + "/")
+            self._session.get(BASE_URL + "/", headers=headers, timeout=15)
+            logger.debug("[%s] 会话预热完成", self.name)
+        except Exception:
+            logger.debug("[%s] 会话预热跳过", self.name)
 
-    def _build_headers(self, referer: str = BASE_URL) -> Dict:
-        """构建请求头, 包含随机UA和Referer."""
+    def _build_headers(self, referer: str = None) -> Dict:
         headers = dict(BASE_HEADERS)
         headers["User-Agent"] = random.choice(USER_AGENTS)
-        headers["Referer"] = referer
+        # 使用真实Referer链，模拟浏览器导航行为
+        if referer:
+            headers["Referer"] = referer
+        else:
+            headers["Referer"] = BASE_URL + "/"
         return headers
 
-    def _fetch_with_retry(self, url: str, is_list_page: bool = False) -> Optional[str]:
-        """带重试机制的HTTP GET请求.
-
-        重试策略:
-          - 每次重试前切换代理(如有代理池)
-          - 指数退避延迟: base, base*2, base*4
-          - 特定HTTP状态码(429, 503)触发额外等待
-          - 连续失败超过最大重试次数后放弃
-        """
+    def _fetch_with_retry(self, url: str, referer: str = None) -> Optional[str]:
         last_error = None
-
         for attempt in range(MAX_RETRIES + 1):
             proxy = None
-            referer = BASE_URL
-            if is_list_page and attempt > 0:
-                referer = LIST_INDEX_URL
-
-            headers = self._build_headers(referer=referer)
+            headers = self._build_headers(referer)
             if self._proxy_pool:
                 proxy = self._proxy_pool.get_proxy()
 
             try:
-                resp = self._session.get(
-                    url, headers=headers, proxies=proxy, timeout=REQUEST_TIMEOUT,
-                )
-
+                resp = self._session.get(url, headers=headers, proxies=proxy,
+                                         timeout=REQUEST_TIMEOUT)
                 if resp.status_code == 200:
                     content = resp.text
-                    # 检测空页面或错误页面
-                    if len(content) < 500 and ("\u9875\u9762\u627e\u4e0d\u5230" in content or "404" in content):
-                        logger.warning(f"\u54cd\u5e94\u5185\u5bb9\u5f02\u5e38: {url}")
+                    if len(content) < 500 and ("页面找不到" in content or "404" in content):
                         if proxy and self._proxy_pool:
                             self._proxy_pool.mark_bad(proxy)
                         continue
@@ -623,68 +869,49 @@ class TenderCrawler:
                     return resp.text
 
                 if resp.status_code == 429:
-                    wait_time = (attempt + 1) * 15
-                    logger.warning(f"HTTP 429 (速率限制), 等待 {wait_time}s...")
-                    time.sleep(wait_time)
+                    time.sleep((attempt + 1) * 15)
                     if proxy and self._proxy_pool:
                         self._proxy_pool.mark_bad(proxy)
                     continue
-
                 if resp.status_code == 503:
-                    logger.warning(f"HTTP 503, 尝试: {attempt + 1}/{MAX_RETRIES}")
                     if proxy and self._proxy_pool:
                         self._proxy_pool.mark_bad(proxy)
                     time.sleep(RETRY_BACKOFF_BASE * (2 ** attempt))
                     continue
 
-                logger.warning(
-                    f"HTTP {resp.status_code}: {url}, 尝试: {attempt + 1}/{MAX_RETRIES}"
-                )
+                logger.warning("[%s] HTTP %d: %s", self.name, resp.status_code, url[:60])
                 if proxy and self._proxy_pool:
                     self._proxy_pool.mark_bad(proxy)
 
             except requests.exceptions.Timeout as e:
                 last_error = e
-                logger.warning(f"请求超时 ({url[:60]}...), 尝试: {attempt + 1}/{MAX_RETRIES}")
                 if proxy and self._proxy_pool:
                     self._proxy_pool.mark_bad(proxy)
             except requests.exceptions.ConnectionError as e:
                 last_error = e
-                logger.warning(f"连接错误, 尝试: {attempt + 1}/{MAX_RETRIES}")
                 if proxy and self._proxy_pool:
                     self._proxy_pool.mark_bad(proxy)
             except requests.exceptions.RequestException as e:
                 last_error = e
-                logger.warning(f"请求异常, 尝试: {attempt + 1}/{MAX_RETRIES}")
                 if proxy and self._proxy_pool:
                     self._proxy_pool.mark_bad(proxy)
 
             if attempt < MAX_RETRIES:
                 wait = RETRY_BACKOFF_BASE * (2 ** attempt)
                 jitter = wait * 0.3 * (random.random() * 2 - 1)
-                actual_wait = wait + jitter
-                logger.debug(f"重试等待 {actual_wait:.1f}s...")
-                time.sleep(actual_wait)
+                time.sleep(wait + jitter)
 
-        logger.error(f"请求最终失败 ({url[:60]}...), 已重试 {MAX_RETRIES} 次: {last_error}")
+        logger.error("[%s] 请求最终失败 (%s), 已重试 %d 次: %s",
+                     self.name, url[:60], MAX_RETRIES, last_error)
         return None
 
-    # ======================== 辅助方法 ========================
-
     def _print_stats(self):
-        """打印爬取统计信息."""
-        proxy_stats = {}
-        if self._proxy_pool:
-            proxy_stats = self._proxy_pool.stats()
-
-        logger.info("=" * 60)
-        logger.info("  爬取统计")
-        logger.info("=" * 60)
-        logger.info(f"  列表页爬取:     {self._stats['list_pages_crawled']} 页")
-        logger.info(f"  详情页爬取:     {self._stats['detail_pages_crawled']} 条 (成功)")
-        logger.info(f"  详情页失败:     {self._stats['detail_pages_failed']} 条")
-        logger.info(f"  收集条目数:     {self._stats['items_collected']} 条")
-        logger.info(f"  过期跳过:       {self._stats['items_skipped_old']} 条")
-        logger.info(f"  日期范围:       最近 {DAYS_LOOKBACK} 天")
-        logger.info(f"  代理池状态:     可用 {proxy_stats.get('available', 'N/A')} 个")
-        logger.info("=" * 60)
+        ps = self._proxy_pool.stats() if self._proxy_pool else {}
+        proxy_count = ps.get("available", 0) if isinstance(ps.get("available"), int) else 0
+        logger.info("[%s] 统计: 列表=%d页 详情=%d条(成功)/%d条(失败) 收集=%d条 跳过=%d条 代理=%d个",
+                     self.name, self._stats["list_pages_crawled"],
+                     self._stats["detail_pages_crawled"],
+                     self._stats["detail_pages_failed"],
+                     self._stats["items_collected"],
+                     self._stats["items_skipped_old"],
+                     proxy_count)

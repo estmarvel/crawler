@@ -27,6 +27,7 @@
 import logging
 import os
 import random
+import re
 import threading
 import time
 from typing import Optional, Dict, List
@@ -206,35 +207,63 @@ class ProxyPool:
         return proxies
 
     def _fetch_free_proxies(self) -> List[Dict[str, str]]:
-        """从免费代理API获取代理列表.
+        """从国内免费代理API获取代理列表.
+
+        支持:
+          - 89ip: 纯文本 ip:port 每行一个
+          - ip3366: HTML表格 <tr><th>IP</th><th>PORT</th>...
 
         Returns:
             代理字典列表
         """
         proxies = []
+        ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/126.0.0.0"
+
         for api_url in FREE_PROXY_APIS:
             try:
-                resp = requests.get(
-                    api_url,
-                    timeout=REQUEST_TIMEOUT,
-                    headers={"User-Agent": random.choice([
-                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/126.0.0.0",
-                        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Chrome/126.0.0.0",
-                    ])},
-                )
-                if resp.status_code == 200:
-                    for line in resp.text.strip().split("\n"):
-                        line = line.strip()
-                        if line and ":" in line:
-                            proxy_dict = self._parse_proxy_line(line)
-                            if proxy_dict:
-                                proxy_dict["source"] = "api"
-                                proxies.append(proxy_dict)
-                    logger.debug(f"从 {api_url[:50]}... 获取到 {len(proxies)} 个代理")
+                resp = requests.get(api_url, timeout=REQUEST_TIMEOUT,
+                                    headers={"User-Agent": ua})
+                if resp.status_code != 200:
+                    continue
+
+                text = resp.text
+
+                if "ip3366" in api_url:
+                    # HTML 表格: <tr><th>IP</th><th>PORT</th><th>匿名度</th><th>类型</th>...
+                    for m in re.finditer(
+                        r'<tr><th>(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})</th>\s*<th>(\d+)</th>',
+                        text,
+                    ):
+                        ip, port = m.group(1), m.group(2)
+                        proxy_dict = self._make_proxy(ip, port)
+                        proxy_dict["source"] = "api_ip3366"
+                        proxies.append(proxy_dict)
+                else:
+                    # 89ip: 纯文本 ip:port 每行
+                    for m in re.finditer(
+                        r'(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}:\d+)',
+                        text,
+                    ):
+                        ip_port = m.group(1)
+                        colon = ip_port.rfind(":")
+                        ip = ip_port[:colon]
+                        port = ip_port[colon + 1:]
+                        proxy_dict = self._make_proxy(ip, port)
+                        proxy_dict["source"] = "api_89ip"
+                        proxies.append(proxy_dict)
+
+                logger.info("从 %s 获取到 %d 个代理",
+                            api_url.split("/")[2], len(proxies))
             except Exception as e:
-                logger.debug(f"免费代理API请求失败 ({api_url[:50]}...): {e}")
+                logger.debug("免费代理API请求失败 (%s): %s", api_url[:60], e)
 
         return proxies
+
+    @staticmethod
+    def _make_proxy(ip: str, port: str) -> Dict[str, str]:
+        """创建标准代理字典."""
+        proxy_url = f"http://{ip}:{port}"
+        return {"http": proxy_url, "https": proxy_url}
 
     @staticmethod
     def _parse_proxy_line(line: str) -> Optional[Dict[str, str]]:
