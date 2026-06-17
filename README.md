@@ -7,6 +7,6 @@ git pull
 ### 2. 保存修改
 git add .
 ### 3. 本地生成版本
-git commit -m "更新爬虫代理池"
+git commit -m ""
 ### 4. 上传到GitHub
 git push
