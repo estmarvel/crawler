@@ -4,17 +4,26 @@
 =============================================================================
 功能:
   - 从本地文件加载代理列表 (proxies.txt)
-  - 从免费代理API自动补充代理
+  - 从天启代理 API 按需提取高质量代理 IP
   - 代理可用性验证(通过请求目标站点)
   - 自动剔除失效代理
+  - 运行时动态补充（IP 过期后重新提取）
   - 线程安全的代理轮换
 
+代理源: 天启代理 (api.tianqiip.com)
+  - 按次提取，支持 HTTP/HTTPS/SOCKS5
+  - IP 有效期 3/5/10/15 分钟可选
+  - 返回 JSON 格式，含 ip/port/expire/city/isp
+
 使用方式:
-  from proxy_pool import ProxyPool
+  from proxy_pool import ProxyPool, ProxyPoolEmptyError
   pool = ProxyPool()
-  proxy = pool.get_proxy()   # 获取一个可用代理 {"http": "...", "https": "..."}
-  pool.mark_bad(proxy)        # 标记代理失效
-  pool.stats()                # 查看代理池状态
+  try:
+      proxy = pool.get_proxy()   # 获取一个可用代理
+  except ProxyPoolEmptyError:
+      sys.exit("无可用代理，爬虫终止")
+  pool.mark_bad(proxy)           # 标记代理失效
+  pool.stats()                   # 查看代理池状态
 
 配置文件 (proxies.txt):
   每行一个代理, 支持以下格式:
@@ -25,23 +34,19 @@
 """
 
 import logging
-import os
 import random
-import re
 import threading
 import time
-from typing import Optional, Dict, List
+from typing import Dict, List
 
 import requests
 
 from config import (
-    FREE_PROXY_APIS,
-    PROXY_FILE,
+    TIANQIIP_API_URL,
+    TIANQIIP_PARAMS,
+    TIANQIIP_MAX_API_CALLS,
     PROXY_MAX_FAILURES,
     PROXY_POOL_MIN_SIZE,
-    PROXY_POOL_TARGET_SIZE,
-    PROXY_VALIDATE_TIMEOUT,
-    PROXY_VALIDATE_URL,
     REQUEST_TIMEOUT,
     BASE_HEADERS,
 )
@@ -49,63 +54,84 @@ from config import (
 logger = logging.getLogger(__name__)
 
 
-class ProxyPool:
-    """IP代理池管理器.
+class ProxyPoolEmptyError(Exception):
+    """代理池枯竭异常 —— 无法获取任何可用代理时抛出。"""
+    pass
 
-    维护一个可用的HTTP/HTTPS代理列表, 支持:
+
+class ProxyPool:
+    """IP 代理池管理器.
+
+    维护一个可用的 HTTP/HTTPS 代理列表，支持:
       - 从本地文件加载代理
-      - 从免费API自动获取代理
-      - 代理有效性验证
-      - 自动故障转移(失效代理剔除)
+      - 从天启代理 API 按需提取
+      - 代理有效性并发验证
+      - 失效代理自动剔除
+      - 运行时动态补充（IP 过期后重新拉取）
       - 统计信息跟踪
+
+    接口规范:
+        pool = ProxyPool()
+        try:
+            proxy = pool.get_proxy()
+        except ProxyPoolEmptyError:
+            # 无可用代理，应终止爬虫
+            ...
+        pool.mark_bad(proxy)
+        pool.stats()
+        pool.refresh()
     """
 
-    def __init__(self, proxy_file: str = None):
-        """
-        Args:
-            proxy_file: 代理配置文件路径, 默认使用 config.PROXY_FILE
-        """
-        self._proxy_file = proxy_file or PROXY_FILE
-        # 可用代理列表: [{"http": "...", "https": "...", "source": "file/api"}]
+    def __init__(self):
         self._proxies: List[Dict[str, str]] = []
-        # 已失效代理(避免重复验证): {proxy_str: fail_count}
         self._bad_proxies: Dict[str, int] = {}
-        # 每个代理的失败计数
         self._fail_counts: Dict[str, int] = {}
-        # 线程安全锁
         self._lock = threading.Lock()
-
-        # 初始化时加载代理
+        self._fetch_lock = threading.Lock()
+        self._api_call_count = 0
+        self._api_call_limit = TIANQIIP_MAX_API_CALLS
         self._init_proxies()
 
     # ======================== 公开接口 ========================
 
-    def get_proxy(self) -> Optional[Dict[str, str]]:
-        """获取一个可用代理.
+    def get_proxy(self) -> Dict[str, str]:
+        """获取一个可用代理。
 
         从代理池中随机选择一个已验证的代理返回。
-        如果代理池为空且自动补充开关已开, 则尝试从免费源获取。
+        如果代理池为空，尝试从 API 动态补充一次，
+        仍为空则抛出 ProxyPoolEmptyError。
 
         Returns:
-            proxies字典 (用于 requests.get(proxies=proxy)), 无可用代理时返回 None
+            proxies 字典 (用于 requests.get(proxies=proxy))
+
+        Raises:
+            ProxyPoolEmptyError: 代理池枯竭，无法获取代理
         """
         with self._lock:
             if not self._proxies:
-                logger.warning("代理池为空, 尝试从免费源补充...")
-                self._fetch_free_proxies()
+                logger.warning("代理池为空，尝试从天启 API 补充...")
+                api_proxies = self._fetch_from_api()
+                if api_proxies:
+                    self._proxies.extend(api_proxies)
                 if not self._proxies:
-                    logger.warning("无法获取可用代理, 将使用直连模式")
-                    return None
+                    raise ProxyPoolEmptyError(
+                        "代理池已枯竭：天启 API 也未返回可用 IP，无法继续爬取"
+                    )
 
             proxy = random.choice(self._proxies)
-            logger.debug(f"分配代理: {proxy['http'][:50]}...")
+            logger.debug("分配代理: %s", proxy["http"])
             return proxy
 
+    def has_proxies(self) -> bool:
+        """检查代理池是否有可用代理（不触发补充）。"""
+        with self._lock:
+            return len(self._proxies) > 0
+
     def mark_bad(self, proxy: Dict[str, str]):
-        """标记代理失效.
+        """标记代理失效。
 
         当使用某个代理请求失败时调用此方法。
-        如果同一代理连续失败超过阈值, 自动从池中移除。
+        同一代理连续失败超过阈值后自动从池中移除。
 
         Args:
             proxy: 失效的代理字典
@@ -120,232 +146,135 @@ class ProxyPool:
 
             if fail_count >= PROXY_MAX_FAILURES:
                 self._bad_proxies[proxy_key] = self._bad_proxies.get(proxy_key, 0) + 1
-                # 从可用列表中移除
                 before = len(self._proxies)
                 self._proxies = [p for p in self._proxies if p.get("http") != proxy_key]
                 removed = before - len(self._proxies)
                 if removed > 0:
-                    logger.warning(f"代理已移除 (连续失败{PROXY_MAX_FAILURES}次): {proxy_key[:60]}...")
+                    logger.warning(
+                        "代理已移除 (连续失败 %d 次): %s", PROXY_MAX_FAILURES, proxy_key
+                    )
 
-                # 如果池子太小, 尝试补充
+                # 如果池子低于最小阈值，触发补充
                 if len(self._proxies) < PROXY_POOL_MIN_SIZE:
-                    logger.info("代理池低于最小阈值, 触发补充...")
-                    self._fetch_free_proxies()
+                    logger.info("代理池低于最小阈值 (%d)，触发 API 补充...", PROXY_POOL_MIN_SIZE)
+                    api_proxies = self._fetch_from_api()
+                    if api_proxies:
+                        self._proxies.extend(api_proxies)
+                        logger.info("API 补充: %d 个 IP 入池", len(api_proxies))
 
     def stats(self) -> Dict:
-        """返回代理池统计信息."""
+        """返回代理池统计信息。
+
+        Returns:
+            {"available": int, "bad_total": int, "min_required": int, "api_calls_used": int, "api_calls_limit": int}
+        """
         with self._lock:
             return {
                 "available": len(self._proxies),
                 "bad_total": len(self._bad_proxies),
                 "min_required": PROXY_POOL_MIN_SIZE,
-                "target_size": PROXY_POOL_TARGET_SIZE,
+                "api_calls_used": self._api_call_count,
+                "api_calls_limit": self._api_call_limit,
             }
 
     def refresh(self):
-        """强制刷新代理池: 清空后重新加载."""
+        """强制刷新代理池：清空并重新从文件+API 加载。"""
         with self._lock:
             self._proxies.clear()
             self._bad_proxies.clear()
             self._fail_counts.clear()
+            self._api_call_count = 0
         self._init_proxies()
 
-    # ======================== 内部方法 ========================
+    # ======================== 内部：初始化 ========================
 
     def _init_proxies(self):
-        """初始化代理池: 先从文件加载, 不足时从免费源补充."""
-        # 1. 从本地文件加载
-        file_proxies = self._load_from_file()
-        valid_file_proxies = self._validate_proxies(file_proxies)
-        self._proxies.extend(valid_file_proxies)
-        logger.info(f"从文件加载代理: {len(valid_file_proxies)}/{len(file_proxies)} 个可用")
+        """初始化代理池：从天启 API 获取 IP。"""
+        logger.info("代理池初始化: 从天启 API 获取 IP...")
+        api_proxies = self._fetch_from_api()
+        self._proxies = api_proxies  # 跳过验证，直接使用
+        logger.info("代理池初始化完成: 共 %d 个可用代理", len(self._proxies))
 
-        # 2. 如果不足目标数量, 从免费源补充
-        if len(self._proxies) < PROXY_POOL_TARGET_SIZE:
-            logger.info(f"代理池当前 {len(self._proxies)} 个, 目标 {PROXY_POOL_TARGET_SIZE} 个, 从免费源补充...")
-            free_proxies = self._fetch_free_proxies()
-            valid_free_proxies = self._validate_proxies(free_proxies)
-            # 去重后加入
-            existing = {p["http"] for p in self._proxies}
-            for p in valid_free_proxies:
-                if p["http"] not in existing:
-                    self._proxies.append(p)
-            logger.info(f"从免费源补充代理: {len(valid_free_proxies)} 个可用")
+    # ======================== 内部：天启 API ========================
 
-        logger.info(f"代理池初始化完成: 共 {len(self._proxies)} 个可用代理")
+    def _fetch_from_api(self) -> List[Dict[str, str]]:
+        """从天启代理 API 提取 IP 列表。
 
-    def _load_from_file(self) -> List[Dict[str, str]]:
-        """从 proxies.txt 加载代理列表.
+        API 返回 JSON 格式:
+        {"code": 1000, "data": [{"ip": "...", "port": "...", ...}]}
 
-        文件格式(每行一个):
-          192.168.1.1:8080
-          192.168.1.2:3128:user:pass
+        API 调用次数受 self._api_call_limit 约束：
+        达到上限后不再请求，返回空列表。
 
         Returns:
             代理字典列表
         """
-        proxies = []
-        if not os.path.exists(self._proxy_file):
-            logger.info(f"代理文件不存在 ({self._proxy_file}), 跳过文件加载")
-            return proxies
-
-        try:
-            with open(self._proxy_file, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line or line.startswith("#"):
-                        continue
-
-                    proxy_dict = self._parse_proxy_line(line)
-                    if proxy_dict:
-                        proxy_dict["source"] = "file"
-                        proxies.append(proxy_dict)
-
-        except Exception as e:
-            logger.error(f"读取代理文件失败: {e}")
-
-        return proxies
-
-    def _fetch_free_proxies(self) -> List[Dict[str, str]]:
-        """从国内免费代理API获取代理列表.
-
-        支持:
-          - 89ip: 纯文本 ip:port 每行一个
-          - ip3366: HTML表格 <tr><th>IP</th><th>PORT</th>...
-
-        Returns:
-            代理字典列表
-        """
-        proxies = []
-        ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/126.0.0.0"
-
-        for api_url in FREE_PROXY_APIS:
-            try:
-                resp = requests.get(api_url, timeout=REQUEST_TIMEOUT,
-                                    headers={"User-Agent": ua})
-                if resp.status_code != 200:
-                    continue
-
-                text = resp.text
-
-                if "ip3366" in api_url:
-                    # HTML 表格: <tr><th>IP</th><th>PORT</th><th>匿名度</th><th>类型</th>...
-                    for m in re.finditer(
-                        r'<tr><th>(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})</th>\s*<th>(\d+)</th>',
-                        text,
-                    ):
-                        ip, port = m.group(1), m.group(2)
-                        proxy_dict = self._make_proxy(ip, port)
-                        proxy_dict["source"] = "api_ip3366"
-                        proxies.append(proxy_dict)
-                else:
-                    # 89ip: 纯文本 ip:port 每行
-                    for m in re.finditer(
-                        r'(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}:\d+)',
-                        text,
-                    ):
-                        ip_port = m.group(1)
-                        colon = ip_port.rfind(":")
-                        ip = ip_port[:colon]
-                        port = ip_port[colon + 1:]
-                        proxy_dict = self._make_proxy(ip, port)
-                        proxy_dict["source"] = "api_89ip"
-                        proxies.append(proxy_dict)
-
-                logger.info("从 %s 获取到 %d 个代理",
-                            api_url.split("/")[2], len(proxies))
-            except Exception as e:
-                logger.debug("免费代理API请求失败 (%s): %s", api_url[:60], e)
-
-        return proxies
-
-    @staticmethod
-    def _make_proxy(ip: str, port: str) -> Dict[str, str]:
-        """创建标准代理字典."""
-        proxy_url = f"http://{ip}:{port}"
-        return {"http": proxy_url, "https": proxy_url}
-
-    @staticmethod
-    def _parse_proxy_line(line: str) -> Optional[Dict[str, str]]:
-        """解析单行代理配置.
-
-        支持格式:
-          ip:port            → http://ip:port
-          ip:port:user:pass  → http://user:pass@ip:port
-
-        Returns:
-            代理字典, 解析失败返回 None
-        """
-        try:
-            parts = line.split(":")
-            if len(parts) == 2:
-                ip, port = parts
-                proxy_url = f"http://{ip}:{port}"
-                return {"http": proxy_url, "https": proxy_url}
-            elif len(parts) == 4:
-                ip, port, user, pwd = parts
-                proxy_url = f"http://{user}:{pwd}@{ip}:{port}"
-                return {"http": proxy_url, "https": proxy_url}
-        except Exception:
-            pass
-        return None
-
-    def _validate_proxies(self, proxies: List[Dict[str, str]]) -> List[Dict[str, str]]:
-        """验证代理列表的可用性.
-
-        通过请求目标站点来测试每个代理是否可用。
-        验证是并发进行的, 以避免阻塞过久。
-
-        Args:
-            proxies: 待验证的代理列表
-
-        Returns:
-            可用代理列表
-        """
-        if not proxies:
-            return []
-
-        valid_proxies = []
-        # 使用线程池并发验证(限制并发数以避免资源耗尽)
-        threads = []
-        results = {}  # proxy_key → bool
-
-        def _validate_one(proxy: Dict[str, str]):
-            proxy_key = proxy.get("http", "")
-            try:
-                resp = requests.get(
-                    PROXY_VALIDATE_URL,
-                    proxies=proxy,
-                    timeout=PROXY_VALIDATE_TIMEOUT,
-                    headers={
-                        "User-Agent": random.choice([
-                            ua for ua in [
-                                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/126.0.0.0",
-                                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Chrome/126.0.0.0",
-                            ]
-                        ]),
-                    },
+        with self._fetch_lock:
+            if self._api_call_count >= self._api_call_limit:
+                logger.warning(
+                    "天启 API 已达调用上限 (%d/%d)，不再请求",
+                    self._api_call_count, self._api_call_limit,
                 )
-                results[proxy_key] = resp.status_code == 200
-            except Exception:
-                results[proxy_key] = False
+                return []
 
-        # 限制并发验证数量
-        batch_size = 10
-        for i in range(0, len(proxies), batch_size):
-            batch = proxies[i:i + batch_size]
-            batch_threads = []
-            for proxy in batch:
-                t = threading.Thread(target=_validate_one, args=(proxy,), daemon=True)
-                t.start()
-                batch_threads.append(t)
+            self._api_call_count += 1
+            proxies = []
+            try:
+                logger.info(
+                    "[API %d/%d] 请求天启 API: %s (time=%s min, num=%d)",
+                    self._api_call_count, self._api_call_limit,
+                    TIANQIIP_API_URL,
+                    TIANQIIP_PARAMS.get("time", 3),
+                    TIANQIIP_PARAMS.get("num", 10),
+                )
+                resp = requests.get(
+                    TIANQIIP_API_URL,
+                    params=TIANQIIP_PARAMS,
+                    timeout=REQUEST_TIMEOUT,
+                    headers={"User-Agent": BASE_HEADERS.get("User-Agent", "")},
+                )
+                if resp.status_code != 200:
+                    logger.error("天启 API 返回 HTTP %d", resp.status_code)
+                    return proxies
 
-            for t in batch_threads:
-                t.join(timeout=PROXY_VALIDATE_TIMEOUT + 5)
+                data = resp.json()
+                if data.get("code") != 1000:
+                    logger.error("天启 API 业务错误: code=%s", data.get("code"))
+                    return proxies
 
-        # 收集有效代理
-        for proxy in proxies:
-            if results.get(proxy.get("http", ""), False):
-                valid_proxies.append(proxy)
+                ip_list = data.get("data", [])
+                if not ip_list:
+                    logger.warning("天启 API 返回空列表")
+                    return proxies
 
-        return valid_proxies
+                for entry in ip_list:
+                    ip = entry.get("ip", "").strip()
+                    port = str(entry.get("port", "")).strip()
+                    if not ip or not port:
+                        continue
+                    proxy_url = f"http://{ip}:{port}"
+                    proxy_dict = {
+                        "http": proxy_url,
+                        "https": proxy_url,
+                        "source": "api_tianqiip",
+                    }
+                    expire = entry.get("expire", "")
+                    city = entry.get("city", "")
+                    isp = entry.get("isp", "")
+                    if expire or city or isp:
+                        proxy_dict["_meta"] = f"{city}-{isp}({expire})"
+                    proxies.append(proxy_dict)
+
+                logger.info(
+                    "[API %d/%d] 天启 API 返回 %d 个 IP",
+                    self._api_call_count, self._api_call_limit, len(proxies),
+                )
+
+            except requests.exceptions.Timeout:
+                logger.error("天启 API 请求超时")
+            except requests.exceptions.RequestException as e:
+                logger.error("天启 API 请求失败: %s", e)
+            except (ValueError, KeyError) as e:
+                logger.error("天启 API 响应解析失败: %s", e)
+
+            return proxies

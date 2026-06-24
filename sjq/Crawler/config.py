@@ -3,18 +3,13 @@
 全国公共资源交易平台（山西省）- 爬虫配置文件
 =============================================================================
 目标网站: https://prec.sxzwfw.gov.cn
-栏目路径: 交易信息 > 工程建设 子栏目
+栏目路径: 交易信息 > 工程建设
 
 4个子栏目:
   zbjh  - 招标计划
   gczb  - 招标/资审公告
   gchxr - 中标候选人公示
   gcgs  - 中标结果公示
-
-说明:
-  - 该站点无 robots.txt, 无需登录即可访问
-  - 页面为服务端渲染(SSR) HTML, 非AJAX动态加载
-  - 列表按发布日期降序排列, 每页10条
 =============================================================================
 """
 
@@ -22,8 +17,6 @@
 
 BASE_URL = "https://prec.sxzwfw.gov.cn"
 
-# ---- 4个栏目的URL配置 ----
-# 每个栏目: (中文名称, 路径前缀, 列表详情正则片段, 输出JSON文件名)
 SECTION_DEFS = [
     {
         "key": "zbjh",
@@ -55,51 +48,70 @@ SECTION_DEFS = [
     },
 ]
 
-# 辅助函数: 根据path_prefix生成URL
+
 def _list_index_url(path_prefix):
     return f"{BASE_URL}/{path_prefix}/index.jhtml"
+
 
 def _list_page_url(path_prefix, page):
     return f"{BASE_URL}/{path_prefix}/index_{page}.jhtml"
 
+
 def _detail_url(path_prefix, detail_id):
     return f"{BASE_URL}/{path_prefix}/{detail_id}.jhtml"
+
 
 def _detail_pattern(path_prefix):
     return rf"/{path_prefix}/(\d+)\.jhtml"
 
-# ======================== 爬取范围与日期过滤 ========================
 
-DAYS_LOOKBACK = 1  # 仅爬取最近N天的数据
-MAX_LIST_PAGES = 30  # 最多翻页数(安全上限)
+# ======================== 爬取范围 ========================
+
+DAYS_LOOKBACK = 2   # 爬取最近 N 天数据
+MAX_LIST_PAGES = 30
 
 # ======================== 请求控制 ========================
 
-REQUEST_DELAY_MIN = 5.0   # 详情页之间最小延迟(秒)
-REQUEST_DELAY_MAX = 10.0  # 详情页之间最大延迟(秒)
-PAGE_TRANSITION_DELAY = (8.0, 15.0)  # 翻页延迟范围(秒)
-SECTION_COOLDOWN = (60.0, 120.0)  # 栏目间冷却间隔(秒)
+REQUEST_DELAY_MIN = 0.5
+REQUEST_DELAY_MAX = 1.5
+PAGE_TRANSITION_DELAY = (1.0, 2.0)
+SECTION_COOLDOWN = (1.0, 2.0)
 REQUEST_TIMEOUT = 30
-MAX_RETRIES = 3
-RETRY_BACKOFF_BASE = 3
-PROXY_MAX_FAILURES = 3
+MAX_RETRIES = 2
+RETRY_BACKOFF_BASE = 2
+
+# ======================== 并发配置 ========================
+
+CONCURRENT_WORKERS = 10       # ThreadPoolExecutor 线程数（= 一次 API 提取的 IP 数）
+DETAIL_BATCH_SIZE = 10        # 每批提交的任务数
 
 # ======================== 代理配置 ========================
 
 PROXY_FILE = "proxies.txt"
-PROXY_POOL_MIN_SIZE = 5
-PROXY_POOL_TARGET_SIZE = 20
+PROXY_POOL_MIN_SIZE = 3
+PROXY_POOL_TARGET_SIZE = 10
 PROXY_VALIDATE_TIMEOUT = 10
 PROXY_VALIDATE_URL = BASE_URL
+PROXY_MAX_FAILURES = 1        # 一次失败立即剔除（IP 生命周期短）
 
-FREE_PROXY_APIS = [
-    # 89ip 免费代理 - 纯文本 ip:port 格式
-    "https://www.89ip.cn/tqdl.html?api=1&num=60",
-    # ip3366 云代理 - HTML表格格式
-    "http://proxy.ip3366.net/free/?action=china&page=1",
-]
+# 天启代理 API 调用上限（2 次 = 20 个 IP × 3 分钟窗口）
+TIANQIIP_MAX_API_CALLS = 2
 
-# ======================== User-Agent 轮换池 ========================
+TIANQIIP_API_URL = "http://api.tianqiip.com/getip"
+TIANQIIP_SECRET = "aliejy64ogh6c1kx"
+TIANQIIP_SIGN = "e69907c179da76044ed221bdb095e0f5"
+
+TIANQIIP_PARAMS = {
+    "secret": TIANQIIP_SECRET,
+    "sign": TIANQIIP_SIGN,
+    "time": 3,       # IP 有效期（分钟）：3/5/10/15
+    "num": 10,       # 每次提取数量
+    "type": "json",
+    "port": 2,       # 1=HTTP, 2=HTTPS, 3=SOCKS5
+    "mr": 2,         # 1=去重, 2=不去重
+}
+
+# ======================== UA 轮换池 ========================
 
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
@@ -111,8 +123,6 @@ USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 Edg/126.0.0.0",
 ]
 
-# ======================== 请求头模板 ========================
-
 BASE_HEADERS = {
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
     "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
@@ -122,7 +132,7 @@ BASE_HEADERS = {
     "Upgrade-Insecure-Requests": "1",
 }
 
-# ======================== 日志配置 ========================
+# ======================== 日志 ========================
 
 LOG_LEVEL = "INFO"
 LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
