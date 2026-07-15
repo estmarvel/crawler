@@ -1,7 +1,7 @@
 #!/bin/bash
 set -Eeuo pipefail
 
-PROJECT_DIR="/home/intsig/zwx/shanxi/spider"
+PROJECT_DIR="/home/intsig/zwx/shanxi"
 ROOT_DIR="/home/intsig/zwx/shanxi"
 PYTHON_BIN="/home/vipuser/miniconda3/envs/myenv/bin/python"
 

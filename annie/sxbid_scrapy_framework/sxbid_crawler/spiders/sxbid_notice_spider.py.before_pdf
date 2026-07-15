@@ -1,0 +1,89 @@
+import scrapy
+
+from sxbid_crawler.columns import COLUMNS, DEFAULT_VALUE, empty_row
+from sxbid_crawler.items import SxbidProjectRowItem
+from sxbid_crawler.parsers import (
+    extract_project_code,
+    parse_detail_summary,
+    parse_related_content,
+    type_label,
+)
+
+
+class SxbidNoticeSpider(scrapy.Spider):
+    name = "sxbid_notice"
+    allowed_domains = ["www.sxbid.com.cn"]
+
+    SAMPLE_URL = (
+        "https://www.sxbid.com.cn/f/new/notice/1/"
+        "78dc2aa41089423390f59c1ab79d6e85"
+    )
+    SAMPLE_TITLE = "山大附中晋源学校东侧规划路工程施工项目(1标段)招标公告"
+
+    def __init__(self, sample_url=None, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.sample_url = sample_url or self.SAMPLE_URL
+
+    def make_start_request(self):
+        return scrapy.Request(
+            url=self.sample_url,
+            callback=self.parse_detail,
+            headers={
+                "Referer": "https://www.sxbid.com.cn/f/new/notice/list/41",
+                "Accept-Language": "zh-CN,zh;q=0.9",
+            },
+            dont_filter=True,
+        )
+
+    async def start(self):
+        yield self.make_start_request()
+
+    def start_requests(self):
+        yield self.make_start_request()
+
+    def parse_detail(self, response):
+        row = empty_row("")
+        parse_detail_summary(response.text, row)
+
+        row["公告类型"] = type_label(self.SAMPLE_TITLE, "notice")
+        row["详情链接"] = response.url
+        row["来源栏目"] = "样例详情页"
+        row["公告历史"] = f"{self.SAMPLE_TITLE}|{response.url}"
+
+        project_code = extract_project_code(response.text)
+        if not project_code:
+            self.logger.warning("详情页未找到项目编号，输出当前已解析字段")
+            yield self.row_to_item(row)
+            return
+
+        related_url = (
+            "https://www.sxbid.com.cn/f/new/notice/"
+            f"getRelatedContent/1/{project_code}"
+        )
+
+        yield scrapy.Request(
+            url=related_url,
+            callback=self.parse_related,
+            cb_kwargs={"row": row},
+            headers={
+                "Referer": response.url,
+                "Accept-Language": "zh-CN,zh;q=0.9",
+            },
+            dont_filter=True,
+        )
+
+    def parse_related(self, response, row):
+        parse_related_content(response.text, row)
+
+        # TODO: 请求并解析公告正文/PDF，补齐地址、联系人和联系方式。
+        # TODO: 解析相关信息列表，完善公告历史。
+        # TODO: 规则提取完成后，仅将缺失字段交给AI补充。
+
+        yield self.row_to_item(row)
+
+    @staticmethod
+    def row_to_item(row):
+        item = SxbidProjectRowItem()
+        for column in COLUMNS:
+            item[column] = row.get(column, DEFAULT_VALUE)
+        return item

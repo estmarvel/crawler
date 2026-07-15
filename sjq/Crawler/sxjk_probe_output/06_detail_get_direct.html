@@ -1,0 +1,581 @@
+<!DOCTYPE html>
+
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+    <meta charset="UTF-8" />
+    <title>山西交控招投标采购服务平台</title>
+    <meta name="keywords" content="" />
+    <meta name="description" content="" />
+
+    <script type="text/javascript" src="/portalSite/js/jquery-3.4.1.min.js"></script>
+    <script type="text/javascript" src="/portalSite/js/jquery.color.js"></script>
+    <script type="text/javascript" src="/portalSite/js/css3-mediaqueries.js"></script>
+    <script type="text/javascript" src="/portalSite/js/main.js"></script>
+    <script type="text/javascript" src="/portalSite/js/main-top.js"></script>
+    <script type="text/javascript" src="/portalSite/js/main-bottom.js"></script>
+    <link rel="stylesheet" href="/portalSite/css/wedui.css" />
+    <link rel="stylesheet" href="/portalSite/css/style.css" />
+    <script src="/ui/back/lib/ajaxSetting.js"></script>
+    <script src="/ui/back/lib/fileUtil.js"></script>
+    <script type="text/javascript" src="/portalSite/js/jquery.bay-window.js"></script>
+    <link rel="stylesheet" href="/portalSite/css/fonticon-container.css" />
+</head>
+<body>
+<!--顶部-->
+
+<style>
+    /*图标*/
+    @font-face{font-family: 'fontello';
+        src: url('/portalSite/font/fontello.eot?95177070');
+        src: url('/portalSite/font/fontello.eot?95177070#iefix') format('embedded-opentype'),
+        url('/portalSite/font/fontello.woff?95177070') format('woff'),
+        url('/portalSite/font/fontello.ttf?95177070') format('truetype'),
+        url('/portalSite/font/fontello.svg?95177070#fontello') format('svg');
+        font-weight: normal;
+        font-style: normal;
+    }
+
+    .demo-icon {
+        font-family: "fontello";
+        font-style: normal;
+        font-weight: normal;
+        -webkit-font-smoothing: antialiased;
+        -moz-osx-font-smoothing: grayscale;
+    }
+</style>
+<div class="top-dh">
+    <div class="content">
+        <div class="top-cont">欢迎访问<span>山西交控招投标采购服务平台</span>，今天是
+            <span>2026年07月03日</span><span>星期五</span></div>
+        <div class="top-daohang">
+            <!--<a class="ptlink" href="javascript:void(0);">网站地图</a>
+            <span>&nbsp;|&nbsp;</span>-->
+            <a class="ptlink" href="/pub/BZZX_pages.html">帮助中心</a>
+        </div>
+    </div>
+</div>
+<div class="top-solo">
+    <div class="content top-solo-pad">
+        <a class="top-solo-logo" href="http://www.sxjkjt.com.cn/index.html?id=0" style="display: block" target="_blank"></a>
+        <div class="top-solo-search">
+            <input id="search-keyname" class="top-solo-search-sea demo-icon" type="text" style="outline: none;" placeholder="&nbsp;&#xe800;&nbsp;请输入搜索关键字" />
+            <button class="top-solo-search-butt" onclick="global_search()">搜索</button>
+        </div>
+    </div>
+</div>
+<div class="top-tab">
+    <div class="content" style="display: flex;flex-direction: row;flex-wrap: nowrap;justify-content: space-evenly;">
+        <div class="top-tab-qih">
+            <a class="ptlinka white" href="/pub/index_pages.html">
+                <div class="top-tab-qiha">首页</div>
+            </a>
+        </div>
+        <div class="top-tab-qih qih-zxzx top-tab-qha">
+            <a href="javascript:void(0);" class="ptlinka white">
+                <div class="top-tab-qiha">资讯中心</div>
+            </a>
+            <div class="top-tab-qih-a">
+                <a class="ptlinka" href="/pub/zxzx_pages.html?typeCode=zxdt">
+                    <div class="top-tab-qih-aa"><span class="ptyd">业务动态</span></div>
+                </a>
+                <a class="ptlinka" href="/pub/zxzx_pages.html?typeCode=tpxw">
+                    <div class="top-tab-qih-aa"><span class="ptyd">图片新闻</span></div>
+                </a>
+                <a class="ptlinka" href="/pub/zxzx_pages.html?typeCode=zytz">
+                    <div class="top-tab-qih-aa"><span class="ptyd">重要通知</span></div>
+                </a>
+            </div>
+        </div>
+        <div class="top-tab-qih">
+            <a href="javascript:void(0);" class="ptlinka white">
+                <div class="top-tab-qiha">交易信息</div>
+            </a>
+            <div class="top-tab-qih-a">
+                <a class="ptlinka" href="/pub/jyxx_pages.html?menuCode=zbcg">
+                    <div class="top-tab-qih-aa"><span class="ptyd">依法必须招标项目</span></div>
+                </a>
+                <a class="ptlinka" href="/pub/jyxx_pages.html?menuCode=qzbcg">
+                    <div class="top-tab-qih-aa"><span class="ptyd">其他必须招标项目</span></div>
+                </a>
+                <a class="ptlinka" href="/pub/jyxx_pages.html?menuCode=fzbcg">
+                    <div class="top-tab-qih-aa"><span class="ptyd">非招标方式采购</span></div>
+                </a>
+<!--                <a th:href="@{/pub/jyxx_pages.html(menuCode=nbcg)}" class="ptlinka">
+                    <div class="top-tab-qih-aa"><span class="ptyd">内部采购</span></div>
+                </a>-->
+                <a class="ptlinka" href="/pub/jyxxquery_pages.html">
+                    <div class="top-tab-qih-aa"><span class="ptyd">综合查询</span></div>
+                </a>
+            </div>
+        </div>
+    
+		<div class="top-tab-qih">
+            
+            <a class="ptlinka white" target="_blank" href="/pub/financial-platform.html">
+                <div class="top-tab-qiha">电子保函服务</div>
+            </a>
+        </div>
+        <div class="top-tab-qih">
+            <a class="ptlinka white" target="_blank" href="/pub/ywbl_pages.html?menuCode=szzsxz">
+                <div class="top-tab-qiha">CA业务办理</div>
+            </a>
+        </div>
+        <div class="top-tab-qih">
+            <a href="javascript:void(0);" class="ptlinka white">
+                <div class="top-tab-qiha">供应商黑名单</div>
+            </a>
+            <div class="top-tab-qih-a">
+                <a class="ptlinka" href="/pub/gysgl_pages.html?typeCode=ztxx">
+                    <div class="top-tab-qih-aa"><span class="ptyd">主体信息</span></div>
+                </a>
+                <a class="ptlinka" href="/pub/hmdgs_pages.html?typeCode=hmdgs">
+                    <div class="top-tab-qih-aa"><span class="ptyd">黑名单公示</span></div>
+                </a>
+                <!--<a th:href="@{/pub/gysgl_pages.html(menuCode=gyspj)}" class="ptlinka">
+                    <div class="top-tab-qih-aa"><span class="ptyd">供应商评价</span></div>
+                </a>
+                <a th:href="@{/pub/gysgl_pages.html(menuCode=cxgl)}" class="ptlinka">
+                    <div class="top-tab-qih-aa"><span class="ptyd">诚信管理</span></div>
+                </a>-->
+            </div>
+        </div>
+        <div class="top-tab-qih">
+            <a href="javascript:void(0);" class="ptlinka white">
+                <div class="top-tab-qiha">政策法规</div>
+            </a>
+            <div class="top-tab-qih-a">
+                <a class="ptlinka" href="/pub/zcfg_pages.html?typeCode=zcfl">
+                    <div class="top-tab-qih-aa"><span class="ptyd">法律</span></div>
+                </a>
+                <a class="ptlinka" href="/pub/zcfg_pages.html?typeCode=xzfg">
+                    <div class="top-tab-qih-aa"><span class="ptyd">法规</span></div>
+                </a>
+                <!--<a th:href="@{/pub/zcfg_pages.html(typeCode=dffg)}" class="ptlinka"><div class="top-tab-qih-aa"><span class="ptyd">地方法规</span></div></a>-->
+                <a class="ptlinka" href="/pub/zcfg_pages.html?typeCode=bmgz">
+                    <div class="top-tab-qih-aa"><span class="ptyd">规范性文件</span></div>
+                </a>
+                <!--<a th:href="@{/pub/zcfg_pages.html(typeCode=dffg)}" class="ptlinka">
+                    <div class="top-tab-qih-aa"><span class="ptyd">集团管理文件</span></div>
+                </a>-->
+            </div>
+        </div>
+        <div class="top-tab-qih">
+            <a href="javascript:void(0);" class="ptlinka white">
+                <div class="top-tab-qiha">服务中心</div>
+            </a>
+            <div class="top-tab-qih-a">
+                <a class="ptlinka" href="/pub/organization.html">
+                    <div class="top-tab-qih-aa"><span class="ptyd">组织机构</span></div>
+                </a>
+                <!--<a th:href="@{/pub/fwzx_pages.html(menuCode=dexx)}" class="ptlinka">
+                    <div class="top-tab-qih-aa"><span class="ptyd">定额信息</span></div>
+                </a>-->
+                <a class="ptlinka" href="/pub/fwzx_pages.html?menuCode=tscl">
+                    <div class="top-tab-qih-aa"><span class="ptyd">投诉处理</span></div>
+                </a>
+                <a class="ptlinka" href="/pub/xzzq_pages.html">
+                    <div class="top-tab-qih-aa"><span class="ptyd">下载专区</span></div>
+                </a>
+                <a class="ptlinka" href="/pub/bzzx_pages.html">
+                    <div class="top-tab-qih-aa"><span class="ptyd">帮助中心</span></div>
+                </a>
+                <a class="ptlinka" href="/pub/fwzx_pages.html?menuCode=lxwm">
+                    <div class="top-tab-qih-aa"><span class="ptyd">联系我们</span></div>
+                </a>
+            </div>
+        </div>
+        <div class="top-tab-qih" style="width: 180px">
+            <a class="ptlinka white" href="/pub/jzcgjg_pages.html">
+                <div class="top-tab-qiha">集中采购材料价格</div>
+            </a>
+        </div>
+    </div>
+</div>
+<script>
+    function global_search() {
+        var keyName = $('#search-keyname').val();
+        var url ='/pub/search-new.html';
+        if (keyName) {
+            window.location.href = url + "?keyName=" + encodeURI(keyName);
+        } else {
+            $('#search-keyname').focus();
+        }
+    }
+</script>
+
+<!--右侧联系方式-->
+
+<!--<div class="pfck">
+    <div class="pfcka pfckdh">
+        <div class="pfcka-img pfcka-imga"></div>
+        <div class="pfcka-text" th:text="${fwdwPhone}"></div>
+    </div>
+    <div class="pfcka pfckqq" style="left: 0px;">
+        <div class="pfcka-img pfcka-imgb" style="position: relative;">
+            <div style="position: absolute;top: 28px;left: 35px;color: rgb(226, 80, 78);font-size: 12px;">1</div>
+        </div>
+        <div class="pfcka-text"  th:text="${qqNumber}">3606342147</div>
+    </div>
+    <div class="pfcka pfckqq" style="left: 0px;">
+        <div class="pfcka-img pfcka-imgb" style="position: relative;">
+            <div style="position: absolute;top: 28px;left: 35px;color: rgb(226, 80, 78);font-size: 12px;">2</div>
+        </div>
+        <div class="pfcka-text" th:text="${qqNumberSecond}">3606342147</div>
+    </div>
+    <div class="pfcka">
+        <a class="pfcka-img pfcka-imgc" th:href="@{/pub/yjzj_pages.html}"></a>
+        <div class="pfcka-text"></div>
+    </div>
+</div>-->
+
+<div class="erji-img">
+</div>
+<div class="index-content">
+	<div class="content">
+		<!--重要通知-->
+		<!--<header th:if="${!isPreview}" th:include="portalSite/fragments/notice :: body" th:remove="tag"></header>-->
+		<div class="erjizt">
+			<div class="erjizt-left">
+				<div class="erjizt-left-title">
+					<div class="erjizt-left-titlea">交易信息</div>
+				</div>
+				<div class="erjizt-left-cont">
+					
+						<div onclick="clickFun(this,true);" class="erjizt-left-cont-dt gyspj" id="ZBCGsplitcode">
+							<div class="erjizt-left-cont-dt-down"></div>
+							依法必须招标项目（仅指新改扩建工程等）
+							<input type="hidden" name="menuCode" value="ZBCG" />
+							<input type="hidden" name="menuName" value="依法必须招标项目（仅指新改扩建工程等）" />
+							<input type="hidden" name="typeCode" />
+							<input type="hidden" name="typeName" />
+						</div>
+						<div class="erjizt-left-cont-dta" id="ZBCGchildren">
+							<div class="erjizt-left-cont-dta-text" onclick="clickFun(this,true);" id="ZBCGsplitcodeCGJHFB">
+								采购计划
+								<input type="hidden" name="menuCode" value="ZBCG" />
+								<input type="hidden" name="menuName" value="依法必须招标项目（仅指新改扩建工程等）" />
+								<input type="hidden" name="typeCode" value="CGJHFB" />
+								<input type="hidden" name="typeName" value="采购计划" />
+							</div>
+							<div class="erjizt-left-cont-dta-text" onclick="clickFun(this,true);" id="ZBCGsplitcodeCGGG">
+								招标公告
+								<input type="hidden" name="menuCode" value="ZBCG" />
+								<input type="hidden" name="menuName" value="依法必须招标项目（仅指新改扩建工程等）" />
+								<input type="hidden" name="typeCode" value="CGGG" />
+								<input type="hidden" name="typeName" value="招标公告" />
+							</div>
+							<div class="erjizt-left-cont-dta-text" onclick="clickFun(this,true);" id="ZBCGsplitcodeGZGG">
+								变更公告
+								<input type="hidden" name="menuCode" value="ZBCG" />
+								<input type="hidden" name="menuName" value="依法必须招标项目（仅指新改扩建工程等）" />
+								<input type="hidden" name="typeCode" value="GZGG" />
+								<input type="hidden" name="typeName" value="变更公告" />
+							</div>
+							<div class="erjizt-left-cont-dta-text" onclick="clickFun(this,true);" id="ZBCGsplitcodeZBHXRGS">
+								中标候选人公示
+								<input type="hidden" name="menuCode" value="ZBCG" />
+								<input type="hidden" name="menuName" value="依法必须招标项目（仅指新改扩建工程等）" />
+								<input type="hidden" name="typeCode" value="ZBHXRGS" />
+								<input type="hidden" name="typeName" value="中标候选人公示" />
+							</div>
+							<div class="erjizt-left-cont-dta-text" onclick="clickFun(this,true);" id="ZBCGsplitcodeJGGG">
+								结果公告
+								<input type="hidden" name="menuCode" value="ZBCG" />
+								<input type="hidden" name="menuName" value="依法必须招标项目（仅指新改扩建工程等）" />
+								<input type="hidden" name="typeCode" value="JGGG" />
+								<input type="hidden" name="typeName" value="结果公告" />
+							</div>
+							<div class="erjizt-left-cont-dta-text" onclick="clickFun(this,true);" id="ZBCGsplitcodeHTBA">
+								合同订立信息
+								<input type="hidden" name="menuCode" value="ZBCG" />
+								<input type="hidden" name="menuName" value="依法必须招标项目（仅指新改扩建工程等）" />
+								<input type="hidden" name="typeCode" value="HTBA" />
+								<input type="hidden" name="typeName" value="合同订立信息" />
+							</div>
+						</div>
+					
+					
+						<div onclick="clickFun(this,true);" class="erjizt-left-cont-dt gyspj" id="QZBCGsplitcode">
+							<div class="erjizt-left-cont-dt-down"></div>
+							其他必须招标项目（养护工程等）
+							<input type="hidden" name="menuCode" value="QZBCG" />
+							<input type="hidden" name="menuName" value="其他必须招标项目（养护工程等）" />
+							<input type="hidden" name="typeCode" />
+							<input type="hidden" name="typeName" />
+						</div>
+						<div class="erjizt-left-cont-dta" id="QZBCGchildren">
+							<div class="erjizt-left-cont-dta-text" onclick="clickFun(this,true);" id="QZBCGsplitcodeCGGG">
+								招标公告
+								<input type="hidden" name="menuCode" value="QZBCG" />
+								<input type="hidden" name="menuName" value="其他必须招标项目（养护工程等）" />
+								<input type="hidden" name="typeCode" value="CGGG" />
+								<input type="hidden" name="typeName" value="招标公告" />
+							</div>
+							<div class="erjizt-left-cont-dta-text" onclick="clickFun(this,true);" id="QZBCGsplitcodeGZGG">
+								变更公告
+								<input type="hidden" name="menuCode" value="QZBCG" />
+								<input type="hidden" name="menuName" value="其他必须招标项目（养护工程等）" />
+								<input type="hidden" name="typeCode" value="GZGG" />
+								<input type="hidden" name="typeName" value="变更公告" />
+							</div>
+							<div class="erjizt-left-cont-dta-text" onclick="clickFun(this,true);" id="QZBCGsplitcodeZBHXRGS">
+								中标候选人公示
+								<input type="hidden" name="menuCode" value="QZBCG" />
+								<input type="hidden" name="menuName" value="其他必须招标项目（养护工程等）" />
+								<input type="hidden" name="typeCode" value="ZBHXRGS" />
+								<input type="hidden" name="typeName" value="中标候选人公示" />
+							</div>
+							<div class="erjizt-left-cont-dta-text" onclick="clickFun(this,true);" id="QZBCGsplitcodeJGGG">
+								结果公告
+								<input type="hidden" name="menuCode" value="QZBCG" />
+								<input type="hidden" name="menuName" value="其他必须招标项目（养护工程等）" />
+								<input type="hidden" name="typeCode" value="JGGG" />
+								<input type="hidden" name="typeName" value="结果公告" />
+							</div>
+						</div>
+					
+					
+						<div onclick="clickFun(this,true);" class="erjizt-left-cont-dt gyspj" id="FZBCGsplitcode">
+							<div class="erjizt-left-cont-dt-down"></div>
+							非招标方式采购
+							<input type="hidden" name="menuCode" value="FZBCG" />
+							<input type="hidden" name="menuName" value="非招标方式采购" />
+							<input type="hidden" name="typeCode" />
+							<input type="hidden" name="typeName" />
+						</div>
+						<div class="erjizt-left-cont-dta" id="FZBCGchildren">
+							<div class="erjizt-left-cont-dta-text" onclick="clickFun(this,true);" id="FZBCGsplitcodeCGGG">
+								非招标方式采购公告
+								<input type="hidden" name="menuCode" value="FZBCG" />
+								<input type="hidden" name="menuName" value="非招标方式采购" />
+								<input type="hidden" name="typeCode" value="CGGG" />
+								<input type="hidden" name="typeName" value="非招标方式采购公告" />
+							</div>
+							<div class="erjizt-left-cont-dta-text" onclick="clickFun(this,true);" id="FZBCGsplitcodeGZGG">
+								变更公告
+								<input type="hidden" name="menuCode" value="FZBCG" />
+								<input type="hidden" name="menuName" value="非招标方式采购" />
+								<input type="hidden" name="typeCode" value="GZGG" />
+								<input type="hidden" name="typeName" value="变更公告" />
+							</div>
+							<div class="erjizt-left-cont-dta-text" onclick="clickFun(this,true);" id="FZBCGsplitcodeZBHXRGS">
+								中标候选人公示
+								<input type="hidden" name="menuCode" value="FZBCG" />
+								<input type="hidden" name="menuName" value="非招标方式采购" />
+								<input type="hidden" name="typeCode" value="ZBHXRGS" />
+								<input type="hidden" name="typeName" value="中标候选人公示" />
+							</div>
+							<div class="erjizt-left-cont-dta-text" onclick="clickFun(this,true);" id="FZBCGsplitcodeJGGG">
+								结果公告
+								<input type="hidden" name="menuCode" value="FZBCG" />
+								<input type="hidden" name="menuName" value="非招标方式采购" />
+								<input type="hidden" name="typeCode" value="JGGG" />
+								<input type="hidden" name="typeName" value="结果公告" />
+							</div>
+						</div>
+					
+					
+				</div>
+			</div>
+			<div class="erjizt-right">
+				<div class="erjizt-right-title">
+					<div class="erjizt-right-titlea" id="contentName" style="display:block-inline">
+							招标公告
+							
+					</div>
+					<div class="erjizt-right-title-src" id="dh">
+						<!--首页-->
+						<a class="ptlink" href="/pub/index_page.html">首页</a>
+						&gt;
+						<!--一级导航-->
+						
+						
+                             <!--不为招采大厅-->
+							
+								<!--不为数字证书服务-->
+								<a class="ptlink" href="/pub/JYXX_pages.html">交易信息</a>
+							
+							
+						
+
+						<!--二级导航-->
+						
+							&gt;
+							<a class="ptlink" href="/pub/JYXX_pages.html?menuCode=ZBCG">依法必须招标项目（仅指新改扩建工程等）</a>
+						
+
+						<!--三级导航-->
+						
+							&gt;
+							<a class="ptlink" href="/pub/JYXX_pages.html?menuCode=ZBCG&amp;typeCode=CGGG">招标公告</a>
+						
+					</div>
+				</div>
+				<div class="erjizt-right-search" id="right-search">
+					<form id="content-search-form" method="post" action="/pub/JYXX_pages.htm">
+						<input type="hidden" name="menuCode" id="menuCode" value="ZBCG" />
+						<input type="hidden" name="typeCode" id="typeCode" value="CGGG" />
+						<input type="hidden" name="page" id="page" value="1" />
+						<input type="hidden" name="pageSize" id="pageSize" value="20" />
+					<div class="erjizt-right-search-left">
+						<div class="erjizt-right-search-lefta">关键字：
+							<input class="erjizt-right-searcha" placeholder="请输入关键字" type="text" id="keyName" name="keyName" value="" />
+						</div>
+					</div>
+					<div class="erjizt-right-search-right" style="margin-top: -48px">
+						<button class="erjizt-right-search-right-butt" type="button" onclick="search()">搜索</button>
+					</div>
+					<input type="hidden" name="_csrf" value="808af96b-f5a6-4e0d-9af9-263e56f7de85" /></form>
+				</div>
+				<div class="erjizt-right-cont" id="rightContentDiv" style="min-height: 600px">
+					<div>数据加载中...</div>
+				</div>
+			</div>
+		</div>
+	</div>
+</div>
+<!-- Start footer -->
+
+<footer class="bottom-footer">
+    <div class="content" style="padding: 30px 0px 0px 0px;">
+
+        <div class="bottom-xin-a">
+            <div class="bottom-a-b-title">运营机构</div>
+            <div class="bottom-a-b-text">山西交通控股集团有限公司招投标采购中心</div>
+            <div class="bottom-a-b-text">联系电话：0351-7876357</div>
+            <div class="bottom-a-b-text">邮箱：jkjtztbcgzx@163.com</div>
+            <div class="bottom-a-b-text">地址：山西省太原市小店区南中环街529号B座2003室</div>
+        </div>
+
+        <div class="bottom-xin-a">
+            <div class="bottom-a-b-title">维护机构</div>
+            <div class="bottom-a-b-text">山西交通控股集团有限公司招投标采购中心</div>
+            <div class="bottom-a-b-text">联系电话：0351-7876392</div>
+            <div class="bottom-a-b-text">邮箱：jkjtztbcgzx@163.com</div>
+            <div class="bottom-a-b-text">地址：山西省太原市小店区南中环街529号B座2003室</div>
+        </div>
+        <div class="bottom-xin-c">
+			<div class="bottom-a-b-text" style="font-size: 16px;">本网站所发布的招标采购信息，未经授权禁止转载，违者追究相关法律责任。</div>
+            <div class="bottom-a-b-text" style="font-size: 14px;">建议使用1280*768以上分辨率。IE8以上版本浏览器访问本网站</div>
+        </div>
+    </div>
+    <div class="bottom-b">
+        <div class="content">
+            <div class="bottom-b-cont">&copy;版权所有&nbsp;山西交通控股集团有限公司&nbsp;
+                备案/许可证编号：晋ICP备18002751号 版本号V12.4.0</div>
+        </div>
+    </div>
+</footer>
+
+<script>
+	/*<![CDATA[*/
+	var canShowMenu = true;
+	var rootCode = 'JYXX';
+	var rootName = '\u4EA4\u6613\u4FE1\u606F';
+	var menuCode = 'ZBCG';
+	var typeCode = 'CGGG';
+	var info = 'c5a65a39-b5ee-42b7-ac3b-83ba5e8f757f';
+	var infoCode = 'detail';
+	var dh;
+	$(function(){
+	    // 导航栏
+         dh = $("#dh").html();
+	    // 栏目
+		if(canShowMenu){
+                var first = $("#"+menuCode+"splitcode");
+                var second = $("#"+menuCode+"splitcode"+typeCode);
+                var three = $("#splitcode"+typeCode);
+                if(first){
+					first.addClass("active");
+					first.css("color","rgb(0,97,173)");
+					first.css("backgroud-color","rgb(240,240,240)");
+					first.css("border-left","2px solid rgb(0,97,173)");
+					first.children("div").eq(0).addClass("erjizt-left-cont-dt-up");
+					$("#"+menuCode+"children").css("display","block");
+                }
+                if(second){
+					second.addClass("active");
+					second.css("color","rgb(0,97,173)");
+				}
+                if(three){
+					three.addClass("active");
+					three.css("color","rgb(0,97,173)");
+					three.css("backgroud-color","rgb(240,240,240)");
+					three.css("border-left","2px solid rgb(0,97,173)");
+					three.children("div").eq(0).removeClass("hi");
+				}
+
+		}
+		// 数据
+
+		    if(info != null && info !== "" && (infoCode === "detail" || infoCode === "preview")){
+		        //详情
+				toDetail(info);
+			} else {
+		        // 列表
+				search();
+
+			}
+
+	});
+	// flag 为true请求数据
+	function clickFun(obj,flag){
+	    var isClose = $(obj).attr("class").indexOf("ata") == -1;
+	    if (flag && isClose){
+			var rootUrl = '/pub/JYXX_pages.html';
+				if(rootCode === 'SZZSFW'){
+					rootUrl = '/pub/ywbl_pages.html?menuCode=JYXX';
+				}
+
+	         dh = '<a href="/pub/index_pages.html" class="ptlink">首页</a>&gt;';
+				if(rootCode === 'ZCDT'){
+					dh = dh + rootName;
+				} else {
+					dh = dh + '<a href="'+rootUrl+'" class="ptlink">'+rootName+'</a>';
+				}
+            var mcode = $(obj).children("input").eq(0).val();
+            var mname = $(obj).children("input").eq(1).val();
+            var tcode = $(obj).children("input").eq(2).val();
+            var tname = $(obj).children("input").eq(3).val();
+            $("#menuCode").val(mcode);
+            $("#typeCode").val(tcode);
+            $("#keyName").val("");
+            $("#page").val(1);
+            if(mname && mname!==""){
+                $("#contentName").text(mname);
+                dh = dh + '&gt;<a href="/pub/'+rootCode+'_pages.html?menuCode='+mcode+'" class="ptlink">'+mname+'</a>'
+            }
+            if(tname && tname!==""){
+                $("#contentName").text(tname);
+                dh = dh + '&gt;<a href="/pub/'+rootCode+'_pages.html?menuCode='+mcode+'&typeCode='+tcode+'" class="ptlink">'+tname+'</a>'
+            }
+            $("#dh").html(dh);
+            $("#right-search").css("display","block");
+            $("#contentName").css("display","inline-block");
+            search();
+		}
+	}
+	function search(){
+	    $.post('/pub/JYXX_pages.htm',$("#content-search-form").serialize(),function(result){
+	        $("#rightContentDiv").html(result);
+		});
+	}
+	function toDetail(info){
+        $("#dh").html(dh +'\t\t\t\t\t\t\t&gt;\n' +
+            '\t\t\t\t\t\t\t<a class="ptlink">详情</a>');
+        $("#right-search").css("display","none");
+        if(infoCode === 'preview'){
+            $.post('/pub/preview_pages.htm',{info:info},function(result){
+                $("#rightContentDiv").html(result);
+            });
+		} else {
+            $.post('/pub/detail_pages.htm',{info:info},function(result){
+                $("#rightContentDiv").html(result);
+                $("#contentName").css("display","none");
+            });
+        }
+	}
+	/*]]>*/
+</script>
+</body>
+</html>

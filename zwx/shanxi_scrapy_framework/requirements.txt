@@ -1,0 +1,9 @@
+scrapy>=2.11
+scrapy-playwright>=0.0.34
+playwright>=1.40
+beautifulsoup4>=4.12
+lxml>=5.0
+python-dotenv>=1.0
+requests>=2.31
+openai>=1.0
+pymupdf>=1.24

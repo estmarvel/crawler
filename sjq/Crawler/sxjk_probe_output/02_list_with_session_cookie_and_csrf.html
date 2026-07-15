@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+
+<html xmlns="http://www.w3.org/1999/xhtml">
+<body>
+
+	<div class="erjizt-right-cont-title">
+		<div class="dt-atext">
+			<div class="dt-texta" style="margin-left: 0px;">序号</div>
+			<div class="dt-textb">标题</div>
+			<div class="dt-texte">发布时间</div>
+		</div>
+		
+	</div>
+	<div class="erjizt-right-cont-dt">
+		<div class="dt-sjxa"></div>
+		<div class="dt-btext">
+			<a href="javascript:void(0);" class="ptlink" onclick="toDetail(&#39;c5a65a39-b5ee-42b7-ac3b-83ba5e8f757f&#39;)">
+				<div class="dt-texta">1</div>
+				<div class="dt-textb  dt-text-ts" style="text-overflow: ellipsis" title="G1812沧榆高速忻保段安全韧性提升工程“代建+监理”招标公告">G1812沧榆高速忻保段安全韧性提升工程“代建+监理”招标公告</div>
+				<div class="dt-texte">2026-03-13</div>
+			</a>
+		</div>
+		
+	</div>
+	<div class="erjizt-right-cont-dt">
+		<div class="dt-sjxa"></div>
+		<div class="dt-btext">
+			<a href="javascript:void(0);" class="ptlink" onclick="toDetail(&#39;d2f46ba3-fcb8-4a03-8a81-b0861b5fefb0&#39;)">
+				<div class="dt-texta">2</div>
+				<div class="dt-textb  dt-text-ts" style="text-overflow: ellipsis" title="国道307线文水南安至汾阳贾家庄段新建工程LJ2标段施工招标公告">国道307线文水南安至汾阳贾家庄段新建工程LJ2标段施工招标公告</div>
+				<div class="dt-texte">2026-02-28</div>
+			</a>
+		</div>
+		
+	</div>
+	<div class="erjizt-right-cont-dt">
+		<div class="dt-sjxa"></div>
+		<div class="dt-btext">
+			<a href="javascript:void(0);" class="ptlink" onclick="toDetail(&#39;bd564bff-621a-43da-8b04-53aa3d21f1b4&#39;)">
+				<div class="dt-texta">3</div>
+				<div class="dt-textb  dt-text-ts" style="text-overflow: ellipsis" title="国道307线文水南安至汾阳贾家庄段新建工程电力迁改工程设计施工总承包招标公告">国道307线文水南安至汾阳贾家庄段新建工程电力迁改工程设计施工总承包招标公告</div>
+				<div class="dt-texte">2026-01-20</div>
+			</a>
+		</div>
+		
+	</div>
+
+      
+      
+      
+	<div class="erjizt-right-page">
+		<div class="pageyema">
+			<button class="erjizt-right-pagea" onclick="toPage(1);">首页</button>
+			<button class="erjizt-right-pagea" onclick="toPrePage(1)">上一页</button>
+		</div>
+		<div class="pageyemb">
+			<button class="erjizt-right-pagea yemas" style="background-color: #2081Ed;color:#fff" onclick="toPage(1)">1</button>
+			<button class="erjizt-right-pagea yemas" onclick="toPage(2)">2</button>
+			<button class="erjizt-right-pagea yemas" onclick="toPage(3)">3</button>
+			<button class="erjizt-right-pagea yemas" onclick="toPage(4)">4</button>
+			<button class="erjizt-right-pagea yemas" onclick="toPage(5)">5</button>
+			<button class="erjizt-right-pagea yemas" onclick="toPage(6)">6</button>
+			<button class="erjizt-right-pagea yemas" onclick="toPage(7)">7</button>
+		</div>
+		<div class="pageyemc">
+			<button class="erjizt-right-pagea" onclick="toNextPage(1)">下一页</button>
+			<button class="erjizt-right-pagea" onclick="toPage(306)">尾页</button>
+		</div>
+	</div>
+
+
+<script>
+	/*<![CDATA[*/
+	var totalPage = 306;
+	// 跳转指定页码 1 开始
+	function toPage(page){
+	    if(page && /(^[1-9]\d*$)/.test(page)){
+            console.info("to:"+page);
+            $("#page").val(page);
+            debugger;
+            search();
+        }
+	}
+	// 跳转上一页
+	function toPrePage(page){
+        if(page && /(^[1-9]\d*$)/.test(page)){
+		    toPage(page-1);
+		}
+	}
+	// 跳转下一页
+	function toNextPage(page){
+        if(page && /(^[1-9]\d*$)/.test(page) && page< totalPage){
+            toPage(page+1);
+        }
+	}
+
+	/*]]>*/
+</script>
+</body>
+</html>

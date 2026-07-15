@@ -1,0 +1,4 @@
+Scrapy>=2.13,<3
+itemadapter>=0.9,<1
+requests>=2.31,<3
+openai>=1,<3

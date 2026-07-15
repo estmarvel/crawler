@@ -1,0 +1,160 @@
+2026-07-13 13:09:31 [scrapy.utils.log] INFO: Scrapy 2.16.0 started (bot: sxbid_crawler)
+2026-07-13 13:09:31 [scrapy.utils.log] INFO: Versions:
+{'lxml': '6.1.1',
+ 'libxml2': '2.14.6',
+ 'cssselect': '1.4.0',
+ 'parsel': '1.11.0',
+ 'w3lib': '2.4.1',
+ 'Twisted': '26.4.0',
+ 'Python': '3.10.20 (main, Jun 11 2026, 15:17:37) [GCC 14.3.0]',
+ 'pyOpenSSL': '26.3.0 (OpenSSL 4.0.1 9 Jun 2026)',
+ 'cryptography': '49.0.0',
+ 'Platform': 'Linux-6.2.0-37-generic-x86_64-with-glibc2.35'}
+2026-07-13 13:09:31 [scrapy.addons] INFO: Enabled addons:
+[]
+2026-07-13 13:09:31 [scrapy.extensions.telnet] INFO: Telnet Password: 905c9783c72b3993
+2026-07-13 13:09:31 [scrapy.middleware] INFO: Enabled extensions:
+['scrapy.extensions.corestats.CoreStats',
+ 'scrapy.extensions.logcount.LogCount',
+ 'scrapy.extensions.telnet.TelnetConsole',
+ 'scrapy.extensions.memusage.MemoryUsage',
+ 'scrapy.extensions.feedexport.FeedExporter',
+ 'scrapy.extensions.logstats.LogStats']
+2026-07-13 13:09:31 [scrapy.crawler] INFO: Overridden settings:
+{'BOT_NAME': 'sxbid_crawler',
+ 'CONCURRENT_REQUESTS': 8,
+ 'CONCURRENT_REQUESTS_PER_DOMAIN': 2,
+ 'DOWNLOAD_DELAY': 2.0,
+ 'DOWNLOAD_TIMEOUT': 30,
+ 'FEED_EXPORT_ENCODING': 'utf-8-sig',
+ 'LOG_LEVEL': 'INFO',
+ 'NEWSPIDER_MODULE': 'sxbid_crawler.spiders',
+ 'REACTOR_THREADPOOL_MAXSIZE': 32,
+ 'RETRY_HTTP_CODES': [403, 407, 408, 429, 500, 502, 503, 504],
+ 'RETRY_TIMES': 5,
+ 'SPIDER_MODULES': ['sxbid_crawler.spiders']}
+2026-07-13 13:09:31 [scrapy.middleware] INFO: Enabled downloader middlewares:
+['scrapy.downloadermiddlewares.offsite.OffsiteMiddleware',
+ 'scrapy.downloadermiddlewares.httpauth.HttpAuthMiddleware',
+ 'scrapy.downloadermiddlewares.downloadtimeout.DownloadTimeoutMiddleware',
+ 'scrapy.downloadermiddlewares.defaultheaders.DefaultHeadersMiddleware',
+ 'sxbid_crawler.middlewares.RandomUserAgentMiddleware',
+ 'scrapy.downloadermiddlewares.useragent.UserAgentMiddleware',
+ 'sxbid_crawler.middlewares.ProxyMiddleware',
+ 'scrapy.downloadermiddlewares.retry.RetryMiddleware',
+ 'scrapy.downloadermiddlewares.redirect.MetaRefreshMiddleware',
+ 'scrapy.downloadermiddlewares.httpcompression.HttpCompressionMiddleware',
+ 'scrapy.downloadermiddlewares.redirect.RedirectMiddleware',
+ 'scrapy.downloadermiddlewares.cookies.CookiesMiddleware',
+ 'scrapy.downloadermiddlewares.httpproxy.HttpProxyMiddleware',
+ 'scrapy.downloadermiddlewares.stats.DownloaderStats']
+2026-07-13 13:09:31 [scrapy.middleware] INFO: Enabled spider middlewares:
+['scrapy.spidermiddlewares.start.StartSpiderMiddleware',
+ 'scrapy.spidermiddlewares.httperror.HttpErrorMiddleware',
+ 'scrapy.spidermiddlewares.referer.RefererMiddleware',
+ 'scrapy.spidermiddlewares.urllength.UrlLengthMiddleware',
+ 'scrapy.spidermiddlewares.depth.DepthMiddleware']
+2026-07-13 13:09:31 [scrapy.middleware] INFO: Enabled item pipelines:
+['sxbid_crawler.pipelines.SxbidCsvUpsertPipeline']
+2026-07-13 13:09:31 [scrapy.core.engine] INFO: Spider opened
+2026-07-13 13:09:31 [scrapy.extensions.logstats] INFO: Crawled 0 pages (at 0 pages/min), scraped 0 items (at 0 items/min)
+2026-07-13 13:09:31 [scrapy.extensions.telnet] INFO: Telnet console listening on 127.0.0.1:6023
+2026-07-13 13:09:31 [scrapy-playwright] INFO: Starting download handler
+2026-07-13 13:09:31 [scrapy-playwright] INFO: Starting download handler
+2026-07-13 13:09:33 [sxbid_notice] INFO: 栏目发现公告: id=11 name=依法招标-招标公告 count=3
+2026-07-13 13:09:39 [sxbid_crawler.middlewares] WARNING: 详情页为空壳响应，换代理重试: url=https://www.sxbid.com.cn/f/new/notice/1/d8fc342029f74d459307bff8e261a166 retry=1/5
+2026-07-13 13:09:39 [scrapy.core.scraper] ERROR: Error downloading <GET https://www.sxbid.com.cn/f/new/notice/1/d8fc342029f74d459307bff8e261a166>
+Traceback (most recent call last):
+  File "/home/vipuser/miniconda3/envs/myenv/lib/python3.10/site-packages/twisted/internet/defer.py", line 1834, in _inlineCallbacks
+    result = context.run(
+  File "/home/vipuser/miniconda3/envs/myenv/lib/python3.10/site-packages/twisted/python/failure.py", line 467, in throwExceptionIntoGenerator
+    return g.throw(self.value.with_traceback(self.tb))
+  File "/home/vipuser/miniconda3/envs/myenv/lib/python3.10/site-packages/scrapy/core/engine.py", line 497, in _download
+    result = yield self.downloader.fetch(request)
+  File "/home/vipuser/miniconda3/envs/myenv/lib/python3.10/site-packages/twisted/internet/defer.py", line 1834, in _inlineCallbacks
+    result = context.run(
+  File "/home/vipuser/miniconda3/envs/myenv/lib/python3.10/site-packages/twisted/python/failure.py", line 467, in throwExceptionIntoGenerator
+    return g.throw(self.value.with_traceback(self.tb))
+  File "/home/vipuser/miniconda3/envs/myenv/lib/python3.10/site-packages/scrapy/core/downloader/__init__.py", line 131, in fetch
+    result: Response | Request = yield (
+  File "/home/vipuser/miniconda3/envs/myenv/lib/python3.10/site-packages/twisted/internet/defer.py", line 1247, in adapt
+    extracted: _SelfResultT | Failure = result.result()
+  File "/home/vipuser/miniconda3/envs/myenv/lib/python3.10/site-packages/scrapy/core/downloader/middleware.py", line 88, in download_async
+    return await self._process_response(result, request)
+  File "/home/vipuser/miniconda3/envs/myenv/lib/python3.10/site-packages/scrapy/core/downloader/middleware.py", line 127, in _process_response
+    self._handle_mw_method(method, request=request, response=response),
+  File "/home/vipuser/miniconda3/envs/myenv/lib/python3.10/site-packages/scrapy/core/downloader/middleware.py", line 94, in _handle_mw_method
+    return method(**kwargs)
+  File "/home/intsig/annie/sxbid_scrapy_framework/sxbid_crawler/middlewares.py", line 120, in process_response
+    retry_request = retry_invalid(
+  File "/home/intsig/annie/sxbid_scrapy_framework/sxbid_crawler/middlewares.py", line 82, in retry_invalid
+    new_request.cb_kwargs = request.cb_kwargs.copy()
+AttributeError: can't set attribute 'cb_kwargs'
+2026-07-13 13:09:54 [sxbid_crawler.middlewares] WARNING: PDF响应无效(bytes=0)，换代理重试: url=https://www.sxbid.com.cn/f/downloadByFileName?type=3&fname=c794cfc0-ca78-4695-90aa-7f6d5886c851 retry=1/5
+2026-07-13 13:09:54 [scrapy.core.scraper] ERROR: Error downloading <GET https://www.sxbid.com.cn/f/downloadByFileName?type=3&fname=c794cfc0-ca78-4695-90aa-7f6d5886c851>
+Traceback (most recent call last):
+  File "/home/vipuser/miniconda3/envs/myenv/lib/python3.10/site-packages/twisted/internet/defer.py", line 1834, in _inlineCallbacks
+    result = context.run(
+  File "/home/vipuser/miniconda3/envs/myenv/lib/python3.10/site-packages/twisted/python/failure.py", line 467, in throwExceptionIntoGenerator
+    return g.throw(self.value.with_traceback(self.tb))
+  File "/home/vipuser/miniconda3/envs/myenv/lib/python3.10/site-packages/scrapy/core/engine.py", line 497, in _download
+    result = yield self.downloader.fetch(request)
+  File "/home/vipuser/miniconda3/envs/myenv/lib/python3.10/site-packages/twisted/internet/defer.py", line 1834, in _inlineCallbacks
+    result = context.run(
+  File "/home/vipuser/miniconda3/envs/myenv/lib/python3.10/site-packages/twisted/python/failure.py", line 467, in throwExceptionIntoGenerator
+    return g.throw(self.value.with_traceback(self.tb))
+  File "/home/vipuser/miniconda3/envs/myenv/lib/python3.10/site-packages/scrapy/core/downloader/__init__.py", line 131, in fetch
+    result: Response | Request = yield (
+  File "/home/vipuser/miniconda3/envs/myenv/lib/python3.10/site-packages/twisted/internet/defer.py", line 1247, in adapt
+    extracted: _SelfResultT | Failure = result.result()
+  File "/home/vipuser/miniconda3/envs/myenv/lib/python3.10/site-packages/scrapy/core/downloader/middleware.py", line 88, in download_async
+    return await self._process_response(result, request)
+  File "/home/vipuser/miniconda3/envs/myenv/lib/python3.10/site-packages/scrapy/core/downloader/middleware.py", line 127, in _process_response
+    self._handle_mw_method(method, request=request, response=response),
+  File "/home/vipuser/miniconda3/envs/myenv/lib/python3.10/site-packages/scrapy/core/downloader/middleware.py", line 94, in _handle_mw_method
+    return method(**kwargs)
+  File "/home/intsig/annie/sxbid_scrapy_framework/sxbid_crawler/middlewares.py", line 98, in process_response
+    retry_request = retry_invalid(
+  File "/home/intsig/annie/sxbid_scrapy_framework/sxbid_crawler/middlewares.py", line 82, in retry_invalid
+    new_request.cb_kwargs = request.cb_kwargs.copy()
+AttributeError: can't set attribute 'cb_kwargs'
+2026-07-13 13:10:10 [sxbid_notice] WARNING: 公告没有找到PDF: https://www.sxbid.com.cn/f/new/notice/1/4593817eb65a44aca922e20f1a47a403
+2026-07-13 13:10:10 [scrapy.core.engine] INFO: Closing spider (finished)
+2026-07-13 13:10:10 [scrapy.extensions.feedexport] INFO: Stored jsonl feed (1 items) in: output/pdf_retry_3.jsonl
+2026-07-13 13:10:10 [scrapy.statscollectors] INFO: Dumping Scrapy stats:
+{'downloader/exception_count': 2,
+ 'downloader/exception_type_count/scrapy.core.downloader.handlers.http11.TunnelError': 1,
+ 'downloader/exception_type_count/scrapy.exceptions.DownloadTimeoutError': 1,
+ 'downloader/request_bytes': 4277,
+ 'downloader/request_count': 9,
+ 'downloader/request_method_count/GET': 9,
+ 'downloader/response_bytes': 39455,
+ 'downloader/response_count': 7,
+ 'downloader/response_status_count/200': 7,
+ 'elapsed_time_seconds': 38.58088110387325,
+ 'feedexport/success_count/FileFeedStorage': 1,
+ 'finish_reason': 'finished',
+ 'finish_time': datetime.datetime(2026, 7, 13, 5, 10, 10, 329808, tzinfo=datetime.timezone.utc),
+ 'httpcompression/response_bytes': 183849,
+ 'httpcompression/response_count': 6,
+ 'item_scraped_count': 1,
+ 'items_per_minute': 1.5789473684210527,
+ 'log_count/ERROR': 2,
+ 'log_count/INFO': 6,
+ 'log_count/WARNING': 3,
+ 'memusage/max': 96768000,
+ 'memusage/startup': 96768000,
+ 'request_depth_max': 3,
+ 'response_received_count': 5,
+ 'responses_per_minute': 7.894736842105264,
+ 'retry/count': 2,
+ 'retry/reason_count/scrapy.core.downloader.handlers.http11.TunnelError': 1,
+ 'retry/reason_count/scrapy.exceptions.DownloadTimeoutError': 1,
+ 'scheduler/dequeued': 9,
+ 'scheduler/dequeued/memory': 9,
+ 'scheduler/enqueued': 9,
+ 'scheduler/enqueued/memory': 9,
+ 'start_time': datetime.datetime(2026, 7, 13, 5, 9, 31, 748923, tzinfo=datetime.timezone.utc)}
+2026-07-13 13:10:10 [scrapy.core.engine] INFO: Spider closed (finished)
+2026-07-13 13:10:10 [scrapy-playwright] INFO: Closing download handler
+2026-07-13 13:10:10 [scrapy-playwright] INFO: Closing download handler

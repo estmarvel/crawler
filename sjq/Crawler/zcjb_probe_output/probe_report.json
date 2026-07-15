@@ -1,0 +1,159 @@
+{
+  "target": "http://sxty.ebidding.net.cn",
+  "entry_url": "http://sxty.ebidding.net.cn/cms/sx/webfile/zdsx=jyxx/index.html?bulletinType=7442510&projectType=7442500&city=",
+  "detail_api_url": "http://sxty.ebidding.net.cn/cms/api/dynamicData/queryContent",
+  "search_api_url": "http://sxty.ebidding.net.cn/cms/api/search/searchKeyWord",
+  "probe_results": [
+    {
+      "name": "01_entry_page",
+      "ok": true,
+      "status_code": 200,
+      "bytes_len": 18925,
+      "text_len": 17452,
+      "has_login_keyword": true,
+      "has_forbidden_keyword": false,
+      "error": "",
+      "saved_file": "zcjb_probe_output/01_entry_page.html"
+    },
+    {
+      "name": "02_detail_page_get",
+      "ok": true,
+      "status_code": 200,
+      "bytes_len": 5038,
+      "text_len": 4848,
+      "has_login_keyword": false,
+      "has_forbidden_keyword": true,
+      "error": "",
+      "saved_file": "zcjb_probe_output/02_detail_page_shell_or_rendered.html",
+      "has_rendered_title": false,
+      "has_rendered_content": false
+    },
+    {
+      "name": "03_detail_api_with_session",
+      "ok": true,
+      "status_code": 200,
+      "bytes_len": 136092,
+      "text_len": 136084,
+      "has_login_keyword": false,
+      "has_forbidden_keyword": false,
+      "error": "",
+      "saved_file": "zcjb_probe_output/03_detail_api_with_session.json",
+      "has_json_res": true,
+      "decode_ok": true,
+      "decoded_saved_file": "zcjb_probe_output/03_detail_api_decoded.json"
+    },
+    {
+      "name": "04_detail_api_no_cookie",
+      "ok": true,
+      "status_code": 200,
+      "bytes_len": 136092,
+      "text_len": 136084,
+      "has_login_keyword": false,
+      "has_forbidden_keyword": false,
+      "error": "",
+      "saved_file": "zcjb_probe_output/04_detail_api_no_cookie.json",
+      "has_json_res": true
+    },
+    {
+      "name": "05_search_api_with_session",
+      "ok": true,
+      "status_code": 200,
+      "bytes_len": 555,
+      "text_len": 453,
+      "has_login_keyword": false,
+      "has_forbidden_keyword": false,
+      "error": "",
+      "saved_file": "zcjb_probe_output/05_search_api_with_session.json",
+      "has_rows": true,
+      "row_count": 1
+    }
+  ],
+  "cookies_after_entry": {},
+  "site_id_from_entry": "744",
+  "detail_html_path_from_entry": "/cms/sx/webfile/detail/index.html",
+  "first_list_item_from_entry": null,
+  "content_id_used": "1251204217046040576",
+  "detail_page_url": "http://sxty.ebidding.net.cn/cms/sx/webfile/detail/index.html?contentId=1251204217046040576",
+  "detail_sample": {
+    "project": {
+      "id": "1239969266057347072",
+      "createId": "1",
+      "gmtCreate": 1778831710000,
+      "modifiedId": null,
+      "gmtModified": null,
+      "condition": null,
+      "outProjectId": "2055120551593938946",
+      "name": "山西宁武大运华盛庄旺煤业有限公司中长协保供煤短途运输项目",
+      "code": "SXZB-26051174F014/01",
+      "projectProp": "50",
+      "purchaseMode": "5010",
+      "province": "140000",
+      "city": "140900",
+      "country": "140925",
+      "bidOrganizationWay": "10",
+      "source": "JYPT-V6",
+      "prefectureCode": "1006",
+      "domain": "sxpt.zcjb.com.cn",
+      "agencyOrgLicenceCode": null,
+      "agencyOrgName": "山西省招标有限公司",
+      "tendereeOrgName": "山西宁武大运华盛庄旺煤业有限公司",
+      "tendereeOrgLicenceCode": "91140000051988717Q",
+      "status": "80"
+    },
+    "category_names": [
+      "招标计划",
+      "招标公告",
+      "变更公告",
+      "中标候选人公示",
+      "中标公告",
+      "其他公告",
+      "暂停/终止公告"
+    ],
+    "titles": [
+      {
+        "id": "1239969266040569856",
+        "title": "山西宁武大运华盛庄旺煤业有限公司中长协保供煤短途运输项目招标公告",
+        "publish_date": "2026-05-15 15:55:10"
+      },
+      {
+        "id": "1249040335045132288",
+        "title": "山西宁武大运华盛庄旺煤业有限公司中长协保供煤短途运输项目中标候选人公示",
+        "publish_date": "2026-06-09 16:40:22"
+      },
+      {
+        "id": "1251204217046040576",
+        "title": "山西宁武大运华盛庄旺煤业有限公司中长协保供煤短途运输项目中标结果公示",
+        "publish_date": "2026-06-15 15:58:52"
+      }
+    ],
+    "matched_content_preview": "",
+    "package_count": 1
+  },
+  "search_rows_sample": [
+    {
+      "content_id": "1257732266151378944",
+      "title": "大同市人民政府国有资产监督管理委员会“4555”生活费测算购买服务项目中标结果公示",
+      "publish_date": "2026-07-03T08:19:00.000Z",
+      "detail_url": "http://sxty.ebidding.net.cn/cms/sx/webfile/detail/index.html?contentId=1257732266151378944",
+      "raw": {
+        "editor": null,
+        "city": "140200",
+        "author": "山西审核专用",
+        "publishDate": "2026-07-03T08:19:00.000Z",
+        "description": null,
+        "title": "大同市人民政府国有资产监督管理委员会“4555”生活费测算购买服务项目中标结果公示",
+        "categoryName": "中标公告",
+        "url": null,
+        "province": "140000",
+        "categoryUrl": "zdsx=jszbjg/index.html",
+        "siteId": "744",
+        "id": "1257732266151378944",
+        "text": null,
+        "categoryId": "7442550",
+        "status": "1"
+      }
+    }
+  ],
+  "cookie_judgement": "本次测试中详情 API 不强依赖 Cookie；但正式爬取仍建议用 requests.Session 先访问入口页再请求 API。",
+  "anti_crawl_judgement": "检测到 401/403/429 或验证码/访问频繁等关键词，疑似存在反爬或访问限制。"
+}
