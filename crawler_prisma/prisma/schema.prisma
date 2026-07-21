@@ -1,0 +1,549 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider          = "mysql"
+  url               = env("DATABASE_URL")
+  shadowDatabaseUrl = env("SHADOW_DATABASE_URL")
+}
+
+enum FavoriteStatus {
+  pending
+  following
+  bid
+  abandoned
+}
+
+model Company {
+  id                            Int                      @id @default(autoincrement())
+  companyName                   String                   @map("company_name")
+  creditCode                    String?                  @unique @map("credit_code")
+  province                      String?
+  city                          String?
+  companyType                   String?                  @map("company_type")
+  qualificationLevel            String?                  @map("qualification_level")
+  businessScope                 String?                  @map("business_scope") @db.Text
+  registeredCapital             Decimal?                 @map("registered_capital") @db.Decimal(18, 2)
+  establishedDate               DateTime?                @map("established_date") @db.Date
+  legalPerson                   String?                  @map("legal_person") @db.VarChar(64)
+  employeeCount                 Int?                     @map("employee_count")
+  createdAt                     DateTime                 @default(now()) @map("created_at")
+  updatedAt                     DateTime                 @updatedAt @map("updated_at")
+  aliases                       CompanyAlias[]
+  ownedProjects                 Project[]                @relation("ProjectOwner")
+  relations                     ProjectCompanyRelation[]
+  profileSnapshots              CompanyProfileSnapshot[]
+  qualifications                CompanyQualification[]
+  personnel                     CompanyPersonnel[]
+  recommendationResults         RecommendationResult[]
+  userFeedbacks                 UserFeedback[]
+  targetCompetitionAnalyses     CompetitionAnalysis[]    @relation("CompetitionTargetCompany")
+  competitorCompetitionAnalyses CompetitionAnalysis[]    @relation("CompetitionCompetitorCompany")
+  winProbabilityAnalyses        WinProbabilityAnalysis[]
+  contracts                     Contract[]               @relation("ContractSellerCompany")
+
+  @@index([companyName])
+  @@map("company")
+}
+
+model CompanyAlias {
+  id        Int      @id @default(autoincrement())
+  companyId Int      @map("company_id")
+  aliasName String   @map("alias_name")
+  source    String?
+  createdAt DateTime @default(now()) @map("created_at")
+  company   Company  @relation(fields: [companyId], references: [id])
+
+  @@index([companyId])
+  @@index([aliasName])
+  @@map("company_alias")
+}
+
+model Project {
+  id                     Int                      @id @default(autoincrement())
+  projectCode            String?                  @map("project_code")
+  projectName            String                   @map("project_name")
+  projectNature          String?                  @map("project_nature")
+  industry               String?
+  projectType            String?                  @map("project_type")
+  tenderMethod           String?                  @map("tender_method")
+  organizationForm       String?                  @map("organization_form")
+  province               String?
+  city                   String?
+  locationText           String?                  @map("location_text") @db.Text
+  ownerCompanyId         Int?                     @map("owner_company_id")
+  ownerCompanyName       String?                  @map("owner_company_name")
+  agencyCompanyName      String?                  @map("agency_company_name")
+  estimatedAmount        Decimal?                 @map("estimated_amount") @db.Decimal(18, 2)
+  tenderAmount           Decimal?                 @map("tender_amount") @db.Decimal(18, 2)
+  fundSource             String?                  @map("fund_source")
+  bidOpenTime            DateTime?                @map("bid_open_time")
+  duration               String?
+  qualityRequirement     String?                  @map("quality_requirement") @db.Text
+  supervisorDepartment   String?                  @map("supervisor_department")
+  currentStatus          String                   @default("TENDER") @map("current_status")
+  firstPublishDate       DateTime?                @map("first_publish_date")
+  createdAt              DateTime                 @default(now()) @map("created_at")
+  updatedAt              DateTime                 @updatedAt @map("updated_at")
+  ownerCompany           Company?                 @relation("ProjectOwner", fields: [ownerCompanyId], references: [id])
+  notices                ProjectNotice[]
+  relations              ProjectCompanyRelation[]
+  favorites              UserFavorite[]
+  requirements           ProjectRequirement[]
+  recommendationResults  RecommendationResult[]
+  userFeedbacks          UserFeedback[]
+  competitionAnalyses    CompetitionAnalysis[]
+  winProbabilityAnalyses WinProbabilityAnalysis[]
+  contracts              Contract[]
+
+  @@index([projectCode])
+  @@index([projectName])
+  @@index([currentStatus, province, city, industry])
+  @@map("project")
+}
+
+model UserFavorite {
+  id        Int            @id @default(autoincrement())
+  userId    Int            @map("user_id")
+  projectId Int            @map("project_id")
+  status    FavoriteStatus @default(pending)
+  note      String?        @db.Text
+  createdAt DateTime       @default(now()) @map("created_at")
+  updatedAt DateTime       @updatedAt @map("updated_at")
+  project   Project        @relation(fields: [projectId], references: [id])
+
+  @@unique([userId, projectId])
+  @@index([userId])
+  @@index([projectId])
+  @@index([status])
+  @@index([createdAt])
+  @@map("user_favorite")
+}
+
+model ProjectNotice {
+  id                Int                       @id @default(autoincrement())
+  projectId         Int                       @map("project_id")
+  noticeType        String                    @map("notice_type")
+  title             String                    @db.VarChar(512)
+  content           String?                   @db.LongText
+  structuredData    Json?                     @map("structured_data")
+  publishDate       DateTime?                 @map("publish_date")
+  sourceSite        String?                   @map("source_site")
+  sourceUrl         String?                   @map("source_url") @db.VarChar(1024)
+  sourceNoticeId    String?                   @map("source_notice_id")
+  crawlTime         DateTime?                 @map("crawl_time")
+  createdAt         DateTime                  @default(now()) @map("created_at")
+  project           Project                   @relation(fields: [projectId], references: [id])
+  attachments       ProjectNoticeAttachment[]
+  relations         ProjectCompanyRelation[]
+  extractionResults NoticeExtraction[]
+  requirements      ProjectRequirement[]
+  contracts         Contract[]
+
+  @@index([projectId])
+  @@index([noticeType])
+  @@index([publishDate])
+  @@index([sourceNoticeId])
+  @@index([noticeType, publishDate])
+  @@map("project_notice")
+}
+
+model ProjectNoticeAttachment {
+  id            Int           @id @default(autoincrement())
+  noticeId      Int           @map("notice_id")
+  fileName      String        @map("file_name")
+  fileUrl       String?       @map("file_url") @db.VarChar(1024)
+  fileType      String?       @map("file_type")
+  storagePath   String?       @map("storage_path") @db.VarChar(1024)
+  fileHash      String?       @map("file_hash") @db.VarChar(64)
+  fileSizeBytes BigInt?       @map("file_size_bytes")
+  parseStatus   String        @default("PENDING") @map("parse_status") @db.VarChar(32)
+  createdAt     DateTime      @default(now()) @map("created_at")
+  notice        ProjectNotice @relation(fields: [noticeId], references: [id])
+
+  @@index([noticeId])
+  @@index([fileHash])
+  @@map("project_notice_attachment")
+}
+
+model ProjectCompanyRelation {
+  id                 Int                       @id @default(autoincrement())
+  projectId          Int                       @map("project_id")
+  noticeId           Int?                      @map("notice_id")
+  companyId          Int?                      @map("company_id")
+  companyName        String                    @map("company_name")
+  relationType       String                    @map("relation_type")
+  stageType          String?                   @map("stage_type")
+  ranking            Int?
+  bidAmount          Decimal?                  @map("bid_amount") @db.Decimal(18, 2)
+  isWinner           Boolean                   @default(false) @map("is_winner")
+  isConsortium       Boolean                   @default(false) @map("is_consortium")
+  isConsortiumLeader Boolean                   @default(false) @map("is_consortium_leader")
+  createdAt          DateTime                  @default(now()) @map("created_at")
+  project            Project                   @relation(fields: [projectId], references: [id])
+  notice             ProjectNotice?            @relation(fields: [noticeId], references: [id])
+  company            Company?                  @relation(fields: [companyId], references: [id])
+  consortiumMembers  ProjectConsortiumMember[]
+  persons            ProjectCompanyPerson[]
+
+  @@unique([projectId, companyName, relationType, stageType], map: "project_company_relation_stage_unique")
+  @@index([projectId])
+  @@index([companyId])
+  @@index([noticeId])
+  @@index([projectId, relationType])
+  @@index([companyId, relationType])
+  @@map("project_company_relation")
+}
+
+model ProjectConsortiumMember {
+  id                Int                    @id @default(autoincrement())
+  relationId        Int                    @map("relation_id")
+  memberCompanyId   Int?                   @map("member_company_id")
+  memberCompanyName String                 @map("member_company_name")
+  memberRole        String?                @map("member_role")
+  createdAt         DateTime               @default(now()) @map("created_at")
+  relation          ProjectCompanyRelation @relation(fields: [relationId], references: [id])
+
+  @@index([relationId])
+  @@index([memberCompanyId, memberRole])
+  @@map("project_consortium_member")
+}
+
+model ProjectCompanyPerson {
+  id              Int                    @id @default(autoincrement())
+  relationId      Int                    @map("relation_id")
+  personName      String                 @map("person_name")
+  personRole      String?                @map("person_role")
+  certificateName String?                @map("certificate_name")
+  certificateNo   String?                @map("certificate_no")
+  createdAt       DateTime               @default(now()) @map("created_at")
+  relation        ProjectCompanyRelation @relation(fields: [relationId], references: [id])
+
+  @@index([relationId])
+  @@map("project_company_person")
+}
+
+model CompanyProfileSnapshot {
+  id                Int      @id @default(autoincrement())
+  companyId         Int      @map("company_id")
+  snapshotDate      DateTime @map("snapshot_date")
+  winProjectCount3y Int      @default(0) @map("win_project_count_3y")
+  mainIndustries    Json?    @map("main_industries")
+  mainRegions       Json?    @map("main_regions")
+  avgWinAmount      Decimal? @map("avg_win_amount") @db.Decimal(18, 2)
+  profileJson       Json?    @map("profile_json")
+  createdAt         DateTime @default(now()) @map("created_at")
+  company           Company  @relation(fields: [companyId], references: [id])
+
+  @@unique([companyId, snapshotDate])
+  @@map("company_profile_snapshot")
+}
+
+model DataSource {
+  id                    Int         @id @default(autoincrement())
+  name                  String      @db.VarChar(200)
+  shortCode             String      @unique @map("short_code") @db.VarChar(32)
+  baseUrl               String?     @map("base_url") @db.VarChar(512)
+  sourceLevel           String?     @map("source_level") @db.VarChar(32)
+  province              String?     @db.VarChar(32)
+  crawlFrequencyMinutes Int         @default(60) @map("crawl_frequency_minutes")
+  crawlConfig           Json?       @map("crawl_config")
+  isEnabled             Boolean     @default(true) @map("is_enabled")
+  createdAt             DateTime    @default(now()) @map("created_at")
+  updatedAt             DateTime    @updatedAt @map("updated_at")
+  crawlTasks            CrawlTask[]
+  rawNotices            RawNotice[]
+
+  @@index([isEnabled])
+  @@map("data_source")
+}
+
+model CrawlTask {
+  id           BigInt      @id @default(autoincrement())
+  dataSourceId Int         @map("data_source_id")
+  taskType     String      @map("task_type") @db.VarChar(32)
+  status       String      @default("PENDING") @db.VarChar(32)
+  scheduledAt  DateTime?   @map("scheduled_at")
+  startedAt    DateTime?   @map("started_at")
+  finishedAt   DateTime?   @map("finished_at")
+  totalCount   Int         @default(0) @map("total_count")
+  successCount Int         @default(0) @map("success_count")
+  failCount    Int         @default(0) @map("fail_count")
+  errorMessage String?     @map("error_message") @db.Text
+  createdAt    DateTime    @default(now()) @map("created_at")
+  dataSource   DataSource  @relation(fields: [dataSourceId], references: [id])
+  rawNotices   RawNotice[]
+
+  @@index([dataSourceId, status])
+  @@index([status, scheduledAt])
+  @@map("crawl_task")
+}
+
+model RawNotice {
+  id                BigInt                @id @default(autoincrement())
+  dataSourceId      Int                   @map("data_source_id")
+  crawlTaskId       BigInt?               @map("crawl_task_id")
+  sourceUrl         String                @map("source_url") @db.VarChar(1024)
+  sourceNoticeId    String?               @map("source_notice_id") @db.VarChar(256)
+  title             String?               @db.VarChar(512)
+  rawHtml           String?               @map("raw_html") @db.LongText
+  rawText           String?               @map("raw_text") @db.LongText
+  publishDate       DateTime?             @map("publish_date")
+  crawlTime         DateTime              @default(now()) @map("crawl_time")
+  parseStatus       String                @default("PENDING") @map("parse_status") @db.VarChar(32)
+  fingerprint       String?               @db.VarChar(64)
+  createdAt         DateTime              @default(now()) @map("created_at")
+  dataSource        DataSource            @relation(fields: [dataSourceId], references: [id])
+  crawlTask         CrawlTask?            @relation(fields: [crawlTaskId], references: [id])
+  attachments       RawNoticeAttachment[]
+  extractionResults NoticeExtraction[]
+
+  @@unique([dataSourceId, sourceNoticeId])
+  @@index([parseStatus])
+  @@index([fingerprint])
+  @@index([crawlTaskId])
+  @@map("raw_notice")
+}
+
+model RawNoticeAttachment {
+  id            BigInt    @id @default(autoincrement())
+  rawNoticeId   BigInt    @map("raw_notice_id")
+  fileName      String?   @map("file_name") @db.VarChar(512)
+  fileUrl       String?   @map("file_url") @db.VarChar(1024)
+  storagePath   String?   @map("storage_path") @db.VarChar(1024)
+  fileHash      String?   @map("file_hash") @db.VarChar(64)
+  fileSizeBytes BigInt?   @map("file_size_bytes")
+  fileType      String?   @map("file_type") @db.VarChar(32)
+  parseStatus   String    @default("PENDING") @map("parse_status") @db.VarChar(32)
+  createdAt     DateTime  @default(now()) @map("created_at")
+  rawNotice     RawNotice @relation(fields: [rawNoticeId], references: [id])
+
+  @@index([rawNoticeId])
+  @@index([fileHash])
+  @@map("raw_notice_attachment")
+}
+
+model NoticeExtraction {
+  id                BigInt         @id @default(autoincrement())
+  rawNoticeId       BigInt         @map("raw_notice_id")
+  projectNoticeId   Int?           @map("project_notice_id")
+  noticeType        String         @map("notice_type") @db.VarChar(64)
+  extractedFields   Json           @map("extracted_fields")
+  extractionModel   String?        @map("extraction_model") @db.VarChar(64)
+  extractionVersion String?        @map("extraction_version") @db.VarChar(32)
+  confidenceScore   Decimal?       @map("confidence_score") @db.Decimal(5, 4)
+  fieldConfidences  Json?          @map("field_confidences")
+  sourceTextSnippet String?        @map("source_text_snippet") @db.Text
+  isVerified        Boolean        @default(false) @map("is_verified")
+  verifiedBy        Int?           @map("verified_by")
+  verifiedAt        DateTime?      @map("verified_at")
+  createdAt         DateTime       @default(now()) @map("created_at")
+  updatedAt         DateTime       @updatedAt @map("updated_at")
+  rawNotice         RawNotice      @relation(fields: [rawNoticeId], references: [id])
+  projectNotice     ProjectNotice? @relation(fields: [projectNoticeId], references: [id])
+
+  @@index([rawNoticeId])
+  @@index([projectNoticeId])
+  @@index([noticeType, isVerified])
+  @@map("notice_extraction")
+}
+
+model ProjectRequirement {
+  id              Int            @id @default(autoincrement())
+  projectId       Int            @map("project_id")
+  noticeId        Int?           @map("notice_id")
+  requirementType String         @map("requirement_type") @db.VarChar(64)
+  requirementText String         @map("requirement_text") @db.Text
+  keywords        Json?
+  isMandatory     Boolean        @default(true) @map("is_mandatory")
+  createdAt       DateTime       @default(now()) @map("created_at")
+  project         Project        @relation(fields: [projectId], references: [id])
+  notice          ProjectNotice? @relation(fields: [noticeId], references: [id])
+
+  @@index([projectId, requirementType])
+  @@index([noticeId])
+  @@map("project_requirement")
+}
+
+model RecommendationResult {
+  id               BigInt    @id @default(autoincrement())
+  companyId        Int       @map("company_id")
+  projectId        Int       @map("project_id")
+  matchScore       Decimal   @map("match_score") @db.Decimal(5, 2)
+  winProbability   Decimal?  @map("win_probability") @db.Decimal(5, 2)
+  recommendLevel   String?   @map("recommend_level") @db.VarChar(32)
+  competitionLevel String?   @map("competition_level") @db.VarChar(16)
+  scoreBreakdown   Json?     @map("score_breakdown")
+  reason           Json?
+  risk             Json?
+  algorithmVersion String    @map("algorithm_version") @db.VarChar(32)
+  isRead           Boolean   @default(false) @map("is_read")
+  createdAt        DateTime  @default(now()) @map("created_at")
+  expiredAt        DateTime? @map("expired_at")
+  company          Company   @relation(fields: [companyId], references: [id])
+  project          Project   @relation(fields: [projectId], references: [id])
+
+  @@unique([companyId, projectId, algorithmVersion], map: "recommendation_result_unique_version")
+  @@index([companyId, matchScore])
+  @@index([companyId, createdAt])
+  @@index([projectId])
+  @@map("recommendation_result")
+}
+
+model UserFeedback {
+  id           Int      @id @default(autoincrement())
+  userId       Int      @map("user_id")
+  companyId    Int      @map("company_id")
+  projectId    Int      @map("project_id")
+  feedbackType String   @map("feedback_type") @db.VarChar(32)
+  comment      String?  @db.Text
+  createdAt    DateTime @default(now()) @map("created_at")
+  company      Company  @relation(fields: [companyId], references: [id])
+  project      Project  @relation(fields: [projectId], references: [id])
+
+  @@unique([userId, projectId])
+  @@index([companyId, feedbackType])
+  @@index([projectId])
+  @@map("user_feedback")
+}
+
+model RecommendationModelVersion {
+  id            Int      @id @default(autoincrement())
+  versionCode   String   @unique @map("version_code") @db.VarChar(32)
+  modelType     String   @map("model_type") @db.VarChar(32)
+  featureConfig Json?    @map("feature_config")
+  description   String?  @db.Text
+  isActive      Boolean  @default(false) @map("is_active")
+  metrics       Json?
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  @@map("recommendation_model_version")
+}
+
+model CompetitionAnalysis {
+  id                    BigInt   @id @default(autoincrement())
+  projectId             Int      @map("project_id")
+  targetCompanyId       Int      @map("target_company_id")
+  competitorCompanyId   Int?     @map("competitor_company_id")
+  competitorName        String?  @map("competitor_name") @db.VarChar(200)
+  threatLevel           String?  @map("threat_level") @db.VarChar(32)
+  competitorScore       Decimal? @map("competitor_score") @db.Decimal(5, 2)
+  overallWinRate        Decimal? @map("overall_win_rate") @db.Decimal(5, 2)
+  encounterCount        Int      @default(0) @map("encounter_count")
+  encounterOpponentWins Int      @default(0) @map("encounter_opponent_wins")
+  advantages            Json?
+  weaknesses            Json?
+  ourAdvantages         Json?    @map("our_advantages")
+  ourWeaknesses         Json?    @map("our_weaknesses")
+  radarData             Json?    @map("radar_data")
+  algorithmVersion      String?  @map("algorithm_version") @db.VarChar(32)
+  createdAt             DateTime @default(now()) @map("created_at")
+  project               Project  @relation(fields: [projectId], references: [id])
+  targetCompany         Company  @relation("CompetitionTargetCompany", fields: [targetCompanyId], references: [id])
+  competitorCompany     Company? @relation("CompetitionCompetitorCompany", fields: [competitorCompanyId], references: [id])
+
+  @@index([projectId, targetCompanyId])
+  @@index([competitorCompanyId])
+  @@map("competition_analysis")
+}
+
+model WinProbabilityAnalysis {
+  id                    BigInt   @id @default(autoincrement())
+  projectId             Int      @map("project_id")
+  companyId             Int      @map("company_id")
+  winProbability        Decimal? @map("win_probability") @db.Decimal(5, 2)
+  probabilityLower      Decimal? @map("probability_lower") @db.Decimal(5, 2)
+  probabilityUpper      Decimal? @map("probability_upper") @db.Decimal(5, 2)
+  positiveFactors       Json?    @map("positive_factors")
+  negativeFactors       Json?    @map("negative_factors")
+  riskFactors           Json?    @map("risk_factors")
+  suggestions           Json?
+  competitionIntensity  String?  @map("competition_intensity") @db.VarChar(16)
+  knownCompetitorsCount Int      @default(0) @map("known_competitors_count")
+  algorithmVersion      String?  @map("algorithm_version") @db.VarChar(32)
+  createdAt             DateTime @default(now()) @map("created_at")
+  project               Project  @relation(fields: [projectId], references: [id])
+  company               Company  @relation(fields: [companyId], references: [id])
+
+  @@index([projectId, companyId])
+  @@index([companyId])
+  @@map("win_probability_analysis")
+}
+
+model CompanyQualification {
+  id               Int       @id @default(autoincrement())
+  companyId        Int       @map("company_id")
+  certName         String    @map("cert_name") @db.VarChar(200)
+  certLevel        String?   @map("cert_level") @db.VarChar(64)
+  certNo           String?   @map("cert_no") @db.VarChar(128)
+  issueDate        DateTime? @map("issue_date") @db.Date
+  expiryDate       DateTime? @map("expiry_date") @db.Date
+  issuingAuthority String?   @map("issuing_authority") @db.VarChar(200)
+  status           String    @default("VALID") @db.VarChar(32)
+  createdAt        DateTime  @default(now()) @map("created_at")
+  updatedAt        DateTime  @updatedAt @map("updated_at")
+  company          Company   @relation(fields: [companyId], references: [id])
+
+  @@index([companyId, status])
+  @@index([expiryDate])
+  @@map("company_qualification")
+}
+
+model CompanyPersonnel {
+  id          Int      @id @default(autoincrement())
+  companyId   Int      @map("company_id")
+  personName  String?  @map("person_name") @db.VarChar(64)
+  personRole  String?  @map("person_role") @db.VarChar(64)
+  certName    String?  @map("cert_name") @db.VarChar(200)
+  certNo      String?  @map("cert_no") @db.VarChar(128)
+  certLevel   String?  @map("cert_level") @db.VarChar(64)
+  isAvailable Boolean  @default(true) @map("is_available")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+  company     Company  @relation(fields: [companyId], references: [id])
+
+  @@index([companyId])
+  @@index([certName])
+  @@map("company_personnel")
+}
+
+model Contract {
+  id                Int            @id @default(autoincrement())
+  projectId         Int            @map("project_id")
+  noticeId          Int?           @map("notice_id")
+  contractNo        String?        @map("contract_no") @db.VarChar(128)
+  contractName      String?        @map("contract_name") @db.VarChar(512)
+  buyerName         String?        @map("buyer_name") @db.VarChar(200)
+  sellerCompanyId   Int?           @map("seller_company_id")
+  sellerName        String?        @map("seller_name") @db.VarChar(200)
+  contractAmount    Decimal?       @map("contract_amount") @db.Decimal(18, 2)
+  signDate          DateTime?      @map("sign_date") @db.Date
+  startDate         DateTime?      @map("start_date") @db.Date
+  endDate           DateTime?      @map("end_date") @db.Date
+  contractContent   String?        @map("contract_content") @db.Text
+  performanceStatus String         @default("ONGOING") @map("performance_status") @db.VarChar(32)
+  createdAt         DateTime       @default(now()) @map("created_at")
+  updatedAt         DateTime       @updatedAt @map("updated_at")
+  project           Project        @relation(fields: [projectId], references: [id])
+  notice            ProjectNotice? @relation(fields: [noticeId], references: [id])
+  sellerCompany     Company?       @relation("ContractSellerCompany", fields: [sellerCompanyId], references: [id])
+
+  @@index([projectId])
+  @@index([noticeId])
+  @@index([sellerCompanyId])
+  @@map("contract")
+}
+
+model SysDict {
+  id        Int      @id @default(autoincrement())
+  dictType  String   @map("dict_type") @db.VarChar(64)
+  dictCode  String   @map("dict_code") @db.VarChar(64)
+  dictLabel String   @map("dict_label") @db.VarChar(128)
+  sortOrder Int      @default(0) @map("sort_order")
+  isEnabled Boolean  @default(true) @map("is_enabled")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@unique([dictType, dictCode])
+  @@map("sys_dict")
+}
