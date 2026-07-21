@@ -351,6 +351,10 @@ NOTICE_EXPORT_EMPTY_FILES = False
 # 不使用数据库；同一公告内容变化时追加新版本，旧版本不覆盖。
 NOTICE_DEDUP_ENABLED = True
 
+# 严格去重模式：已导出过的源站公告 ID 不再请求详情。默认关闭，以便普通生产任务
+# 在列表字段发生变化时保存公告新版本；华新手工增量脚本会显式开启。
+NOTICE_DEDUP_SKIP_KNOWN_IDENTITIES = False
+
 # 附件下载默认关闭，由已经验证过下载接口的 Spider 单独开启。文件保存在
 # FILES_STORE/<网站代码>/attachments/，storage_path 记录其相对路径。
 NOTICE_ATTACHMENT_DOWNLOAD_ENABLED = False

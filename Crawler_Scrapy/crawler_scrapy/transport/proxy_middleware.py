@@ -23,6 +23,7 @@ from crawler_scrapy.transport.proxy_pool import (
     ProxyPoolEmptyError,
     TianqiProxyPool,
 )
+from crawler_scrapy.transport.scrapy_compat import request_spider_close
 
 
 class StaticProxyMiddleware:
@@ -42,6 +43,7 @@ class StaticProxyMiddleware:
         self.authorization = authorization
         self.required = required
         self.retry_times = max(0, retry_times)
+        self._closing = False
 
     @classmethod
     def from_crawler(cls, crawler):
@@ -100,9 +102,16 @@ class StaticProxyMiddleware:
     def spider(self):
         return self.crawler.spider
 
-    async def _close_spider(self, reason: str) -> None:
+    def _close_spider(self, reason: str) -> None:
+        if self._closing:
+            return
+        self._closing = True
         if self.crawler.engine is not None:
-            await self.crawler.engine.close_spider_async(self.spider, reason=reason)
+            request_spider_close(
+                self.crawler.engine,
+                self.spider,
+                reason,
+            )
 
     def process_request(self, request: Request):
         request.meta["proxy"] = self.endpoint
@@ -113,7 +122,7 @@ class StaticProxyMiddleware:
     async def process_response(self, request: Request, response):
         if response.status == 407:
             self.crawler.stats.inc_value("static_proxy/auth_failed")
-            await self._close_spider("static_proxy_auth_failed")
+            self._close_spider("static_proxy_auth_failed")
         elif response.status < 400:
             self.crawler.stats.inc_value("static_proxy/success")
         return response
@@ -138,7 +147,7 @@ class StaticProxyMiddleware:
             retry.headers[b"Proxy-Authorization"] = self.authorization
             return retry
         if self.required:
-            await self._close_spider("static_proxy_unavailable")
+            self._close_spider("static_proxy_unavailable")
         return None
 
     def spider_closed(self, spider, reason: str) -> None:
@@ -156,6 +165,7 @@ class TianqiProxyMiddleware:
         self.crawler = crawler
         self.pool = pool
         self.required = required
+        self._closing = False
         self.proxy_failure_statuses = set(
             crawler.settings.getlist(
                 "TIANQI_PROXY_FAILURE_HTTP_CODES",
@@ -201,9 +211,16 @@ class TianqiProxyMiddleware:
     def spider(self):
         return self.crawler.spider
 
-    async def _close_spider(self, reason: str) -> None:
+    def _close_spider(self, reason: str) -> None:
+        if self._closing:
+            return
+        self._closing = True
         if self.crawler.engine is not None:
-            await self.crawler.engine.close_spider_async(self.spider, reason=reason)
+            request_spider_close(
+                self.crawler.engine,
+                self.spider,
+                reason,
+            )
 
     async def process_request(self, request: Request):
         if request.meta.get("proxy"):
@@ -214,7 +231,7 @@ class TianqiProxyMiddleware:
             )
         except (ProxyPoolConfigurationError, ProxyPoolEmptyError) as exc:
             self.crawler.stats.inc_value("proxy/pool_empty")
-            await self._close_spider("proxy_pool_empty")
+            self._close_spider("proxy_pool_empty")
             raise IgnoreRequest(
                 f"无法取得代理，已终止任务且未发送目标请求：{exc}"
             ) from exc
@@ -256,7 +273,7 @@ class TianqiProxyMiddleware:
             if retry is not None:
                 return retry
             if self.required:
-                await self._close_spider("proxy_retry_exhausted")
+                self._close_spider("proxy_retry_exhausted")
         elif response.status < 400:
             self.pool.mark_good(request.meta.get("_tianqi_proxy"))
             self.crawler.stats.inc_value("proxy/success")
@@ -267,12 +284,12 @@ class TianqiProxyMiddleware:
             return None
         if not request.meta.get("_tianqi_proxy"):
             if self.required:
-                await self._close_spider("unproxied_request_failure")
+                self._close_spider("unproxied_request_failure")
             return None
         self.crawler.stats.inc_value("proxy/network_exception")
         retry = self._retry_with_new_proxy(request, exception)
         if retry is None and self.required:
-            await self._close_spider("proxy_retry_exhausted")
+            self._close_spider("proxy_retry_exhausted")
         return retry
 
     def spider_closed(self, spider, reason: str) -> None:

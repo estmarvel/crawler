@@ -7,6 +7,8 @@ from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from urllib.parse import urlsplit
 
+from crawler_scrapy.transport.scrapy_compat import request_spider_close
+
 
 class DirectAccessGuardMiddleware:
     """遇到 403/429 时提高下载槽延迟，连续出现则主动关闭 Spider。
@@ -35,6 +37,7 @@ class DirectAccessGuardMiddleware:
         )
         self._consecutive = defaultdict(int)
         self._total_blocks = 0
+        self._closing = False
 
     @classmethod
     def from_crawler(cls, crawler):
@@ -120,9 +123,11 @@ class DirectAccessGuardMiddleware:
         ):
             stats.inc_value("direct_guard/spider_closed")
             engine = getattr(self.crawler, "engine", None)
-            if engine is not None:
-                await engine.close_spider_async(
+            if engine is not None and not self._closing:
+                self._closing = True
+                request_spider_close(
+                    engine,
                     self.crawler.spider,
-                    reason="direct_access_blocked",
+                    "direct_access_blocked",
                 )
         return response

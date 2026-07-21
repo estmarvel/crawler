@@ -517,11 +517,18 @@ class NoticeSchemaPipeline:
         adapter["is_verified"] = is_verified
         adapter["attachments"] = attachments
         adapter["data"] = normalized_data
-        adapter["missing_fields"] = get_missing_fields(
+        missing_fields = get_missing_fields(
             notice_type_name,
             normalized_data,
             include_optional=False,
         )
+        if not self.crawler.settings.getbool("NOTICE_SNAPSHOT_ENABLED", True):
+            missing_fields = [
+                field
+                for field in missing_fields
+                if field not in {"HTML快照路径", "HTML快照SHA256"}
+            ]
+        adapter["missing_fields"] = missing_fields
 
         if not adapter.get("title"):
             spider.logger.warning(

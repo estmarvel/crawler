@@ -52,6 +52,25 @@ class _ExportSpider(BaseNoticeSpider):
 
 
 class DedupStoreTest(unittest.TestCase):
+    def test_list_fingerprint_ignores_view_count_but_keeps_business_changes(self):
+        original = {
+            "annId": "1001",
+            "annTitle": "公告A",
+            "releaseTime": "2026-07-16 10:00:00",
+            "clickTimes": 10,
+        }
+        viewed = {**original, "clickTimes": 999}
+        changed = {**original, "annTitle": "公告A（变更）"}
+
+        self.assertEqual(
+            build_list_fingerprint(original),
+            build_list_fingerprint(viewed),
+        )
+        self.assertNotEqual(
+            build_list_fingerprint(original),
+            build_list_fingerprint(changed),
+        )
+
     def test_identity_and_content_versions_are_independent(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "notice_versions.json"
@@ -70,6 +89,8 @@ class DedupStoreTest(unittest.TestCase):
                 notice_id="1001",
                 list_fingerprint=list_v1,
             )
+            self.assertTrue(store.has_identity(identity))
+            self.assertFalse(store.has_identity("site-a|id:missing"))
             self.assertFalse(store.reserve(identity, "content-v1"))
             self.assertFalse(store.should_fetch_detail(identity, list_v1))
             self.assertTrue(store.should_fetch_detail(identity, list_v2))
@@ -166,6 +187,20 @@ class AppendExportTest(unittest.TestCase):
                 2,
             )
             self.assertEqual(crawler2.stats.values["dedup/duplicate_versions"], 1)
+
+    def test_disabled_snapshots_are_not_reported_as_missing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output_root = Path(directory)
+            spider = _ExportSpider()
+            crawler = _Crawler(spider, output_root)
+            crawler.settings.set("NOTICE_SNAPSHOT_ENABLED", False)
+            schema = NoticeSchemaPipeline.from_crawler(crawler)
+            item = self._item(spider, "不保存快照的正文")
+
+            result = schema.process_item(item)
+
+            self.assertNotIn("HTML快照路径", result["missing_fields"])
+            self.assertNotIn("HTML快照SHA256", result["missing_fields"])
 
 
 if __name__ == "__main__":

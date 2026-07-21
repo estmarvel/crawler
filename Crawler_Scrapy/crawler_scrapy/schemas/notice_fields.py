@@ -76,6 +76,7 @@ ANNOUNCEMENT_SCHEMAS: Final["OrderedDict[str, tuple[str, ...]]"] = OrderedDict(
         ),
         "资格预审公告": _with_system_fields(
             "项目性质",
+            "源站公告性质",
             "项目名称",
             "所属行业",
             "组织形式",
@@ -110,6 +111,7 @@ ANNOUNCEMENT_SCHEMAS: Final["OrderedDict[str, tuple[str, ...]]"] = OrderedDict(
         ),
         "招标公告": _with_system_fields(
             "项目性质",
+            "源站公告性质",
             "项目名称",
             "所属行业",
             "组织形式",
@@ -147,6 +149,7 @@ ANNOUNCEMENT_SCHEMAS: Final["OrderedDict[str, tuple[str, ...]]"] = OrderedDict(
         ),
         "中标候选人公示": _with_system_fields(
             "项目性质",
+            "源站公告性质",
             "项目名称",
             "所属行业",
             "组织形式",
@@ -198,6 +201,7 @@ ANNOUNCEMENT_SCHEMAS: Final["OrderedDict[str, tuple[str, ...]]"] = OrderedDict(
         ),
         "中标结果公示": _with_system_fields(
             "项目性质",
+            "源站公告性质",
             "项目名称",
             "所属行业",
             "组织形式",

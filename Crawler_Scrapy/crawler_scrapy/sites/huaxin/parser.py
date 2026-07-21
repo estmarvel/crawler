@@ -19,6 +19,33 @@ from crawler_scrapy.schemas.notice_fields import (
 from crawler_scrapy.sites.huaxin.config import PLATFORM_NAME, WEB_BASE_URL
 
 
+BIDDING_NATURE_LABELS: dict[str, dict[str, str]] = {
+    "1": {
+        "1": "正常",
+        "2": "再次",
+        "3": "重新",
+        "4": "变更",
+        "5": "终止",
+        "6": "延期",
+        "7": "控制价",
+        "8": "补充",
+        "9": "控制价变更",
+        "10": "暂停",
+        "11": "暂停恢复",
+    },
+    "2": {
+        "1": "中标候选人公示",
+        "4": "更正中标候选人公示",
+        "5": "撤销中标候选人公示",
+    },
+    "3": {
+        "1": "中标结果",
+        "4": "更正中标结果",
+        "5": "撤销中标结果",
+    },
+}
+
+
 def _string(value: Any) -> str:
     return "" if value is None else str(value).strip()
 
@@ -89,6 +116,10 @@ def _combine_text(detail: Mapping[str, Any]) -> str:
         normalized = part.strip()
         if not normalized or normalized in seen:
             continue
+        # annContent经常已经包含reviewSituation/contactInformation等结构化片段。
+        # 子段已完整存在于主正文时不再追加，避免候选人和联系方式重复一遍。
+        if any(normalized in existing for existing in result):
+            continue
         seen.add(normalized)
         result.append(normalized)
     return "\n".join(result)
@@ -112,6 +143,24 @@ def _join_distinct(*values: Any, separator: str = "|") -> str:
     return separator.join(result)
 
 
+def _source_notice_nature(detail: Mapping[str, Any]) -> str:
+    """按华新前端 JS 映射 annNature，并同时保留源站代码。"""
+
+    nature = _code(detail.get("annNature"))
+    if not nature:
+        return ""
+    classification = _code(detail.get("annClassification"))
+    label = BIDDING_NATURE_LABELS.get(classification, {}).get(nature, "未知")
+    return f"{label}（annNature={nature}）"
+
+
+def _flexible_label(label: str) -> str:
+    """把中文标签转换为允许字符间空格的正则，例如“联 系 人”。"""
+
+    compact = re.sub(r"\s+", "", label)
+    return r"\s*".join(re.escape(char) for char in compact)
+
+
 def _extract_label(text: str, labels: Iterable[str]) -> str:
     """按“标签：值”提取，并在新章节或下一个标签处停止。"""
 
@@ -120,7 +169,8 @@ def _extract_label(text: str, labels: Iterable[str]) -> str:
     for index, line in enumerate(lines):
         for label in labels:
             match = re.search(
-                rf"(?:^|\s)(?:\d+(?:\.\d+)*\s*)?{re.escape(label)}\s*[：:]\s*(.*)$",
+                rf"(?:^|\s)(?:\d+(?:\.\d+)*(?:[、.．])?\s*)?"
+                rf"{_flexible_label(label)}\s*[：:]\s*(.*)$",
                 line,
             )
             if not match:
@@ -129,11 +179,16 @@ def _extract_label(text: str, labels: Iterable[str]) -> str:
             for following in lines[index + 1 :]:
                 if re.match(r"^(?:\d+(?:\.\d+)*|[一二三四五六七八九十]+)[、.．]\s*", following):
                     break
-                if any(re.match(rf"^{re.escape(other)}\s*[：:]", following) for other in labels):
+                if any(
+                    re.match(rf"^{_flexible_label(other)}\s*[：:]", following)
+                    for other in labels
+                ):
                     break
+                compact_following = re.sub(r"\s+", "", following)
                 if re.match(
-                    r"^(?:项目|招标|投标|开标|开启|递交|获取|联系人|联系方式|地址|电话|监督部门).{0,12}[：:]",
-                    following,
+                    r"^(?:(?:\d+(?:\.\d+)*[、.．]?)|[一二三四五六七八九十]+[、.．])?"
+                    r"[\u4e00-\u9fffA-Za-z/（）()]{1,24}[：:]",
+                    compact_following,
                 ):
                     break
                 chunks.append(following)
@@ -189,7 +244,7 @@ def _contact_section(text: str) -> str:
 
     lines = [
         line.strip()
-        for line in clean_html_keep_lines(text).splitlines()
+        for line in _normalize_contact_text(clean_html_keep_lines(text)).splitlines()
         if line.strip()
     ]
     heading = re.compile(
@@ -198,6 +253,36 @@ def _contact_section(text: str) -> str:
     )
     indices = [index for index, line in enumerate(lines) if heading.match(line)]
     return "\n".join(lines[indices[-1] + 1 :]) if indices else "\n".join(lines)
+
+
+def _normalize_contact_text(text: str) -> str:
+    """只规范联系方式行首标签，不改动机构名、地址和联系人实际内容。"""
+
+    label_patterns = (
+        (r"招\s*标\s*代\s*理\s*机\s*构", "招标代理机构"),
+        (r"招\s*标\s*代\s*理", "招标代理机构"),
+        (r"代\s*理\s*机\s*构", "代理机构"),
+        (r"招\s*标\s*人", "招标人"),
+        (r"采\s*购\s*人", "采购人"),
+        (r"详\s*细\s*地\s*址", "详细地址"),
+        (r"地\s*址", "地址"),
+        (r"联\s*系\s*人", "联系人"),
+        (r"联\s*系\s*电\s*话", "联系电话"),
+        (r"联\s*络\s*电\s*话", "联系电话"),
+        (r"电\s*话", "电话"),
+        (r"联\s*系\s*方\s*式", "联系方式"),
+        (r"电\s*子\s*邮\s*(?:件|箱)", "电子邮件"),
+    )
+    result: list[str] = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        for pattern, canonical in label_patterns:
+            match = re.match(rf"^{pattern}\s*[：:]\s*(.*)$", line)
+            if match:
+                line = f"{canonical}：{match.group(1).strip()}"
+                break
+        result.append(line)
+    return "\n".join(result)
 
 
 def _contact_block(text: str, party: str) -> str:
@@ -236,7 +321,10 @@ def _contact_value(text: str, party: str, field: str) -> str:
         "name": ("招标代理机构", "代理机构") if party == "agent" else ("招标人", "采购人"),
         "address": ("招标代理机构地址", "招标人地址", "详细地址", "地址", "地 址"),
         "contact": ("招标代理机构联系人", "招标人联系人", "联系人", "联 系 人"),
-        "phone": ("招标代理机构联系方式", "招标人联系方式", "联系方式", "电话", "电 话"),
+        "phone": (
+            "招标代理机构联系方式", "招标人联系方式", "联系方式",
+            "联系电话", "联络电话", "电话", "电 话",
+        ),
     }[field]
     if field == "name":
         value = ""
@@ -257,18 +345,121 @@ def _contact_value(text: str, party: str, field: str) -> str:
 
 def _project_numbers(detail: Mapping[str, Any], text: str) -> str:
     values: list[str] = []
-    source = "\n".join(
-        filter(None, (_string(detail.get("diyProjectNo")), _string(detail.get("purDiyCode")), text))
+    sources = tuple(
+        filter(
+            None,
+            (
+                _string(detail.get("diyProjectNo")),
+                _string(detail.get("purDiyCode")),
+                text,
+            ),
+        )
     )
-    for pattern in (r"E\d{19}", r"[A-Z]{2,10}-[A-Z]{2}\d{8}"):
-        for match in re.finditer(pattern, re.sub(r"\s+", "", source)):
-            if match.group(0) not in values:
-                values.append(match.group(0))
+    for pattern in (
+        r"E\d{19}",
+        # 代理招标编号的字母段中经常带数字，例如ZDF03-HZ260502、
+        # HXCT01-2026G001；要求至少含一个连字符，避免把邮箱或普通单词当编号。
+        r"[A-Z][A-Z0-9]{1,15}(?:-[A-Z0-9]{2,20})+",
+    ):
+        for source in sources:
+            # 允许HTML span造成的水平空格，但保留换行，否则下一行
+            # “2.3 招标内容”的2会被粘到编号末尾。
+            normalized_source = re.sub(r"[^\S\r\n]+", "", source)
+            for match in re.finditer(pattern, normalized_source):
+                if match.group(0) not in values:
+                    values.append(match.group(0))
     if not values:
         fallback = _string(detail.get("diyProjectNo") or detail.get("purDiyCode"))
         if fallback:
             values.append(fallback)
     return "；".join(values)
+
+
+def _extract_tender_scope(text: str) -> str:
+    """提取完整招标内容与范围，保留后续001/002等标段内容。"""
+
+    stops = (
+        "投标人资格要求",
+        "申请人资格要求",
+        "资格要求",
+        "招标文件的获取",
+        "资格预审文件的获取",
+        "文件的获取",
+        "计划工期",
+        "服务期限",
+        "服务周期",
+        "服务期",
+        "供货期限",
+        "供货期",
+        "交货期限",
+        "交货期",
+        "质量要求",
+        "质量标准",
+        "项目地点",
+        "建设地点",
+        "工程地点",
+    )
+    # 先找具体子标题，避免在“项目概况和招标范围”大章节处过早开始。
+    scope = _extract_section(text, ("招标内容与范围",), stops)
+    if scope:
+        return scope
+    return _extract_section(
+        text,
+        ("项目概况与招标范围", "项目概况和招标范围", "招标范围"),
+        stops,
+    )
+
+
+def _extract_acquisition_way(text: str) -> str:
+    """从文件获取章节识别没有显式“获取方式”标签的下载句。"""
+
+    value = _extract_label(text, ("获取方法", "获取方式", "发售方式"))
+    if value:
+        return value
+    lines = [line.strip() for line in clean_html_keep_lines(text).splitlines() if line.strip()]
+    start = next(
+        (
+            index + 1
+            for index, line in enumerate(lines)
+            if any(
+                heading in line
+                for heading in ("招标文件的获取", "资格预审文件的获取", "文件的获取")
+            )
+        ),
+        -1,
+    )
+    if start < 0:
+        return ""
+    for line in lines[start:]:
+        if any(stop in line for stop in ("投标文件的递交", "申请文件的递交", "开标时间")):
+            break
+        compact = re.sub(r"\s+", "", line)
+        if "获取时间" in compact or "售价" in compact:
+            continue
+        if not re.search(r"(?:下载|在线获取|现场获取|领取).*(?:招标|预审)?文件", compact):
+            continue
+        return re.sub(
+            r"^\s*\d+(?:\.\d+)*(?:[、.．])?\s*",
+            "",
+            line,
+        ).strip(" ：:；;")
+    return ""
+
+
+def _infer_candidate_section(lines: Iterable[str]) -> str:
+    """评标表没有标段表头时，仅在前文唯一指明标段时回填。"""
+
+    source = "\n".join(lines)
+    pattern = re.compile(
+        r"(?<!\d)(?:\d{3}\s*(?:(?:第?[一二三四五六七八九十百\d]+|不分))?标段"
+        r"|第[一二三四五六七八九十百\d]+标段|不分标段)"
+    )
+    matches: list[str] = []
+    for match in pattern.finditer(source):
+        value = re.sub(r"\s+", "", match.group(0))
+        if value not in matches:
+            matches.append(value)
+    return matches[0] if len(matches) == 1 else ""
 
 
 def _candidate_name_price_pairs(text: str) -> tuple[list[str], list[str]]:
@@ -285,7 +476,9 @@ def _candidate_name_price_pairs(text: str) -> tuple[list[str], list[str]]:
         len(raw_lines),
     )
     lines = raw_lines[start:end] or raw_lines
-    section_pattern = re.compile(r"^(\d{3}[^：:\n]*?标段)\s*[：:]?\s*$")
+    section_pattern = re.compile(
+        r"^((?:\d{3}[^：:\n]*?标段)|不分标段)\s*[：:]?\s*$"
+    )
     indices = [
         (index, match.group(1).strip())
         for index, line in enumerate(lines)
@@ -297,10 +490,18 @@ def _candidate_name_price_pairs(text: str) -> tuple[list[str], list[str]]:
             block_end = indices[position + 1][0] if position + 1 < len(indices) else len(lines)
             blocks.append((section_name, lines[index + 1 : block_end]))
     else:
-        blocks.append(("", lines))
+        blocks.append((_infer_candidate_section(raw_lines[:start]), lines))
 
     name_pattern = re.compile(
         r"(?:(?:推荐\s*)?第?[一二三123]?名?\s*中标候选人(?:名称)?|第[一二三123]中标候选人(?:名称)?)\s*[：:]\s*(.+)$"
+    )
+    # 玖邦常把名次、候选人和报价写在同一行，例如：
+    # “第1名：甲公司,投标报价：782000元”。名次只用于识别记录，不写入公司名。
+    rank_pattern = re.compile(
+        r"^第\s*[一二三四五六七八九十百\d]+\s*名\s*[：:]\s*(.+)$"
+    )
+    inline_price_pattern = re.compile(
+        r"(投标总报价|投标报价|响应报价|投标价格|报价)\s*[：:]\s*([^，,；;]+)"
     )
     price_pattern = re.compile(
         r"(.{0,40}?(?:投标总报价|投标报价|响应报价|投标价格|报价))\s*[：:]\s*(.+)$"
@@ -309,9 +510,94 @@ def _candidate_name_price_pairs(text: str) -> tuple[list[str], list[str]]:
     prices: list[str] = []
     for section_name, block_lines in blocks:
         candidates: list[tuple[str, list[str]]] = []
+        # 部分玖邦公告由表格转成纵向纯文本：
+        # 排序 / 中标候选人名称 / 投标报价（万元） / 1 / 公司 / 3595.02。
+        candidate_header = next(
+            (
+                index
+                for index, line in enumerate(block_lines)
+                if re.fullmatch(r"中标候选人(?:名称)?", line)
+            ),
+            -1,
+        )
+        price_header = next(
+            (
+                index
+                for index in range(candidate_header + 1, min(len(block_lines), candidate_header + 4))
+                if re.search(r"(?:投标)?报价", block_lines[index])
+            ),
+            -1,
+        )
+        if candidate_header >= 0 and price_header >= 0:
+            unit_match = re.search(r"(亿元|万元|元|%|％)", block_lines[price_header])
+            unit = unit_match.group(1) if unit_match else ""
+            table_end = next(
+                (
+                    index
+                    for index in range(price_header + 1, len(block_lines))
+                    if block_lines[index] == "序号"
+                    or re.match(
+                        r"^\d+[、.．]\s*中标候选人(?:响应|按照|资格)",
+                        block_lines[index],
+                    )
+                ),
+                len(block_lines),
+            )
+            cursor = price_header + 1
+            while cursor < table_end:
+                if not re.fullmatch(r"\d+", block_lines[cursor]):
+                    cursor += 1
+                    continue
+                if cursor + 1 >= table_end:
+                    break
+                candidate_name = block_lines[cursor + 1].strip(" ；;，,。")
+                quote_lines: list[str] = []
+                next_index = cursor + 2
+                if next_index < table_end:
+                    price_value = block_lines[next_index].strip(" ；;，,。")
+                    numeric_price = re.fullmatch(
+                        r"[-+]?\d[\d,，]*(?:\.\d+)?\s*(?:亿元|万元|元|%|％)?",
+                        price_value,
+                    )
+                    # 整数报价同样合法。只有该数字恰好是下一顺位，且后面紧跟公司名时，
+                    # 才把它视为“下一行排名”，用于兼容某候选人确实缺少报价的表格。
+                    next_rank = (
+                        re.fullmatch(r"\d+", price_value)
+                        and int(price_value) == int(block_lines[cursor]) + 1
+                        and next_index + 1 < table_end
+                        and not re.fullmatch(r"\d+", block_lines[next_index + 1])
+                    )
+                    if numeric_price and not next_rank:
+                        quote_lines.append(f"投标报价：{price_value}{unit}")
+                        cursor = next_index + 1
+                    else:
+                        cursor = next_index
+                else:
+                    cursor = next_index
+                if candidate_name:
+                    candidates.append((candidate_name, quote_lines))
+
         active_index = -1
-        for line in block_lines:
+        for line in (() if candidates else block_lines):
             if re.search(r"中标候选人(?:基本情况|按照|响应|资格能力|公示)", line):
+                continue
+            rank_match = rank_pattern.search(line)
+            if rank_match:
+                ranked_content = rank_match.group(1).strip()
+                inline_price_match = inline_price_pattern.search(ranked_content)
+                quote_lines: list[str] = []
+                if inline_price_match:
+                    candidate_name = ranked_content[: inline_price_match.start()]
+                    candidate_name = candidate_name.strip(" ；;，,。").strip()
+                    price_value = inline_price_match.group(2).strip().rstrip("。")
+                    quote_lines.append(
+                        f"{inline_price_match.group(1)}：{price_value}"
+                    )
+                else:
+                    candidate_name = ranked_content.strip(" ；;，,。").strip()
+                if candidate_name:
+                    candidates.append((candidate_name, quote_lines))
+                    active_index = len(candidates) - 1
                 continue
             name_match = name_pattern.search(line)
             if name_match:
@@ -324,7 +610,19 @@ def _candidate_name_price_pairs(text: str) -> tuple[list[str], list[str]]:
                 candidates[active_index][1].append(
                     f"{price_match.group(1).strip()}：{price_match.group(2).strip()}"
                 )
+        deduplicated: list[tuple[str, list[str]]] = []
+        positions: dict[str, int] = {}
         for candidate_name, quote_lines in candidates:
+            key = re.sub(r"\s+", "", candidate_name)
+            if key in positions:
+                position = positions[key]
+                if not deduplicated[position][1] and quote_lines:
+                    deduplicated[position] = (candidate_name, quote_lines)
+                continue
+            positions[key] = len(deduplicated)
+            deduplicated.append((candidate_name, quote_lines))
+
+        for candidate_name, quote_lines in deduplicated:
             names.append(
                 f"{section_name}：{candidate_name}" if section_name else candidate_name
             )
@@ -353,7 +651,10 @@ def _candidate_details(
         candidate_name = name
         if "：" in name:
             possible_section, possible_name = name.split("：", 1)
-            if re.match(r"^\d{3}.*标段$", possible_section.strip()):
+            if re.match(
+                r"^(?:\d{3}.*标段|第[一二三四五六七八九十百\d]+标段|不分标段)$",
+                possible_section.strip(),
+            ):
                 section = possible_section.strip()
                 candidate_name = possible_name.strip()
         raw_price = price_values[index] if index < len(price_values) else None
@@ -482,6 +783,13 @@ def _award_details(
     return result
 
 
+# 可复用的纯文本结果配对接口。山西省公共资源交易平台等 HTML 站点使用同一套
+# “标段—名称—报价”规则，避免各站再次实现容易错位的平行数组解析。
+candidate_name_price_pairs = _candidate_name_price_pairs
+candidate_details = _candidate_details
+award_details = _award_details
+
+
 def _attachments(detail: Mapping[str, Any]) -> list[dict[str, Any]]:
     """收集页面附件，以及没有 HTML 正文时的 PDF 详情原件。
 
@@ -539,6 +847,9 @@ def _attachments(detail: Mapping[str, Any]) -> list[dict[str, Any]]:
 class HuaxinParser:
     """把华新详情 JSON 转换为框架的八类公告字段。"""
 
+    platform_name = PLATFORM_NAME
+    web_base_url = WEB_BASE_URL
+
     subtype_to_notice_type = {
         "zbjh": "招标计划",
         "zbys": "资格预审公告",
@@ -589,8 +900,8 @@ class HuaxinParser:
         data = canonicalize_notice_data(notice_type, data)
         return subtype, notice_type, data, data["附件"]
 
-    @staticmethod
-    def detail_url(subtype: str, detail: Mapping[str, Any]) -> str:
+    @classmethod
+    def detail_url(cls, subtype: str, detail: Mapping[str, Any]) -> str:
         identifier = _string(
             detail.get("_route_planid")
             or detail.get("annId")
@@ -600,8 +911,8 @@ class HuaxinParser:
         if not identifier:
             return ""
         if subtype == "zbjh":
-            return f"{WEB_BASE_URL}/#/biddingplan?planid={identifier}"
-        return f"{WEB_BASE_URL}/#/biddingdetails?annId={identifier}"
+            return f"{cls.web_base_url}/#/biddingplan?planid={identifier}"
+        return f"{cls.web_base_url}/#/biddingdetails?annId={identifier}"
 
     @staticmethod
     def raw_html(detail: Mapping[str, Any]) -> str:
@@ -613,15 +924,21 @@ class HuaxinParser:
 
         return _combine_text(detail)
 
-    @staticmethod
-    def _common(data: dict[str, Any], detail: Mapping[str, Any]) -> tuple[str, str]:
+    @classmethod
+    def _common(cls, data: dict[str, Any], detail: Mapping[str, Any]) -> tuple[str, str]:
         text = _combine_text(detail)
-        contact = clean_html_keep_lines(
-            detail.get("bidContactInformation")
-            or detail.get("contactInformation")
-            or detail.get("annContent")
-            or detail.get("annContent2")
-        )
+        # 正文通常包含页面最终展示的完整“联系方式”章节；结构化联系方式HTML可能
+        # 只含招标人或代理机构的一方，因此正文优先，并把两个HTML片段作为补充。
+        contact_parts: list[str] = []
+        for value in (
+            detail.get("annContent") or detail.get("annContent2"),
+            detail.get("bidContactInformation"),
+            detail.get("contactInformation"),
+        ):
+            normalized = clean_html_keep_lines(value)
+            if normalized and normalized not in contact_parts:
+                contact_parts.append(normalized)
+        contact = _normalize_contact_text("\n".join(contact_parts))
         if "项目性质" in data:
             data["项目性质"] = _string(
                 detail.get("projectNatureName")
@@ -629,6 +946,8 @@ class HuaxinParser:
                 or detail.get("projectPropertyName")
                 or detail.get("projectProperty")
             ) or _extract_label(text, ("项目性质",))
+        if "源站公告性质" in data:
+            data["源站公告性质"] = _source_notice_nature(detail)
         if "项目名称" in data:
             data["项目名称"] = _project_name(
                 detail.get("annTitle")
@@ -643,7 +962,7 @@ class HuaxinParser:
         if "发布日期" in data:
             data["发布日期"] = _string(detail.get("releaseTime") or detail.get("createTime"))
         if "发布网站" in data:
-            data["发布网站"] = _string(detail.get("mediaName")) or PLATFORM_NAME
+            data["发布网站"] = _string(detail.get("mediaName")) or cls.platform_name
         return text, contact
 
     @classmethod
@@ -710,7 +1029,8 @@ class HuaxinParser:
         funding_source = _extract_label(text, ("资金来源", "项目资金来源"))
         if not funding_source:
             match = re.search(
-                r"项目资金来源(?:为|是|[：:])\s*([^，。；;\n]+)", text
+                r"(?:项目资金(?:来源)?|资金来源)(?:为|是|[：:])\s*([^，。；;\n]+)",
+                text,
             )
             funding_source = match.group(1).strip() if match else ""
         data["资金来源"] = funding_source
@@ -723,12 +1043,26 @@ class HuaxinParser:
         if "项目规模" in data:
             data["项目规模"] = _extract_label(text, ("项目规模", "建设规模", "工程规模"))
         if "工期/服务期/供货日期" in data:
-            data["工期/服务期/供货日期"] = _extract_label(text, ("工期", "服务期", "供货期", "计划工期", "交货期"))
+            data["工期/服务期/供货日期"] = _extract_label(
+                text,
+                (
+                    "工期",
+                    "计划工期",
+                    "服务期限",
+                    "服务周期",
+                    "服务期",
+                    "合同履行期限",
+                    "供货期限",
+                    "供货期",
+                    "交货期限",
+                    "交货期",
+                ),
+            )
         if "质量要求" in data:
             data["质量要求"] = _extract_label(text, ("质量要求", "质量标准"))
         overview = "\n".join(filter(None, (clean_html(detail.get("projectOverview")), clean_html(detail.get("bidOverview")))))
         if not overview:
-            overview = _extract_label(text, ("项目概况与招标范围", "招标内容与范围", "招标范围", "招标内容"))
+            overview = _extract_tender_scope(text)
         overview_field = "项目概况与招标范围" if prequalification else "招标内容与范围"
         data[overview_field] = overview
         qualification = "\n".join(filter(None, (clean_html(detail.get("bidQualification")), clean_html(detail.get("consortiumQualification")))))
@@ -736,7 +1070,7 @@ class HuaxinParser:
             qualification = _extract_section(text, ("投标人资格要求", "申请人资格要求", "资格要求"), ("招标文件的获取", "资格预审文件的获取", "文件的获取"))
         data["申请人资格要求/投标人资格要求"] = qualification
         data["预审文件获取时间"] = _format_range(detail.get("acquisitionStart"), detail.get("acquisitionEnd"))
-        data["获取方式"] = _string(detail.get("acquisitionWay")) or _extract_label(text, ("获取方法", "获取方式", "发售方式"))
+        data["获取方式"] = _string(detail.get("acquisitionWay")) or _extract_acquisition_way(text)
         data["递交截止时间"] = _string(detail.get("submitDeadline"))
         data["递交方法"] = _string(detail.get("submitWay")) or _extract_label(text, ("递交方法", "递交方式"))
         data["开启时间"] = _string(detail.get("submitDeadline"))
@@ -823,7 +1157,6 @@ class HuaxinParser:
     def _extract_gzjg(cls, data: dict[str, Any], detail: Mapping[str, Any]) -> None:
         # 更正结果复用结果公示页面结构，只写当前 Schema 中存在的字段。
         text, contact = cls._common(data, detail)
-        nature = _code(detail.get("annNature"))
-        data["公共类型"] = {"4": "更正中标结果", "5": "撤销中标结果"}.get(nature, "")
+        data["公共类型"] = _source_notice_nature(detail)
         data["公告内容"] = clean_html(detail.get("otherContent") or detail.get("otherAnnContent") or detail.get("annContent"))
         cls._fill_contacts(data, detail, contact)

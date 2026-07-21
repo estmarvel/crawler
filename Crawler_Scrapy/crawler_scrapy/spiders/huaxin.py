@@ -3,12 +3,15 @@
 示例：
     scrapy crawl huaxin -a max_records=20
     scrapy crawl huaxin -a sections=zbgg_zys,hxr
+    scrapy crawl huaxin -a days=180 -a max_records=100000 -a max_pages=10000
 
-``sections`` 支持：zbgg_zys、hxr、gs、zbjh。
+``sections`` 支持：zbgg_zys、hxr、gs、zbjh。``days`` 表示从当前时间向前
+采集多少天；也可以显式传 ``start_date/end_date``。
 """
 
 from __future__ import annotations
 
+from datetime import datetime, time, timedelta
 from typing import Any, Iterable, Mapping
 from urllib.parse import urljoin
 
@@ -18,6 +21,7 @@ from scrapy.http import JsonRequest, Response
 
 from crawler_scrapy.sites.huaxin import config
 from crawler_scrapy.sites.huaxin.parser import HuaxinParser
+from crawler_scrapy.schemas.notice_fields import coerce_datetime
 from crawler_scrapy.spiders.base_notice import BaseNoticeSpider
 
 
@@ -25,10 +29,13 @@ class HuaxinSpider(BaseNoticeSpider):
     """采集华新四个一级栏目，并输出框架统一的 NoticeItem。"""
 
     name = "huaxin"
+    site_config = config
+    parser_class = HuaxinParser
     platform_name = config.PLATFORM_NAME
     platform_code = config.PLATFORM_CODE
     allowed_domains = ["www.ygcgpt.com"]
-    parser_version = "huaxin-v5"
+    parser_version = "huaxin-v9"
+    extraction_model_name = "huaxin-rule-parser"
 
     # 结构化 API 已直接返回的字段不再交给 AI；只有规则解析后仍为空、且可能
     # 出现在 annContent/annContent2 正文中的字段才进入公共 AI 接口。
@@ -78,10 +85,13 @@ class HuaxinSpider(BaseNoticeSpider):
         "CONCURRENT_REQUESTS_PER_DOMAIN": 4,
         "DOWNLOAD_DELAY": 0.3,
         "AUTOTHROTTLE_TARGET_CONCURRENCY": 2.0,
+        # 华新详情由结构化 API 返回；不再保存 HTML 快照。招标计划本身没有
+        # raw_html，关闭后也不会产生误导性的快照缺失警告。
+        "NOTICE_SNAPSHOT_ENABLED": False,
         "NOTICE_SNAPSHOT_REQUIRED": False,
         # AI 开启时允许它补充华新映射中明确列出的可选业务字段。
         "NOTICE_AI_INCLUDE_OPTIONAL_FIELDS": True,
-        "HUAXIN_RESOLVE_ATTACHMENT_URLS": True,
+        "NOTICE_RESOLVE_ATTACHMENT_URLS": True,
         # 只下载源附件并回写预设元数据字段；不执行 OCR/AI 文档解析。
         "NOTICE_ATTACHMENT_DOWNLOAD_ENABLED": True,
         # 天启备用模式的原有配置；update_settings 会按所选出口模式覆盖它。
@@ -101,7 +111,9 @@ class HuaxinSpider(BaseNoticeSpider):
         if mode == "tianqi":
             return
         if mode == "direct":
-            raise ValueError("华新出口策略禁止 direct，任何情况下都不得使用服务器公网 IP")
+            raise ValueError(
+                f"{cls.platform_name}出口策略禁止 direct，任何情况下都不得使用服务器公网 IP"
+            )
         if mode != "static":
             raise ValueError(
                 f"不支持的 CRAWLER_OUTBOUND_MODE={mode!r}；可选 static/tianqi"
@@ -172,6 +184,10 @@ class HuaxinSpider(BaseNoticeSpider):
         max_records: int | str = 200,
         page_size: int | str = 50,
         max_pages: int | str = 10,
+        days: int | str | None = None,
+        lookback_days: int | str | None = None,
+        start_date: str | None = None,
+        end_date: str | None = None,
         *args: Any,
         **kwargs: Any,
     ) -> None:
@@ -180,8 +196,15 @@ class HuaxinSpider(BaseNoticeSpider):
         self.max_records = self._positive_int(max_records, 200)
         self.page_size = min(self._positive_int(page_size, 50), 100)
         self.max_pages = self._positive_int(max_pages, 10)
+        requested_days = lookback_days if lookback_days not in (None, "") else days
+        self.window_start, self.window_end = self._parse_time_window(
+            requested_days,
+            start_date,
+            end_date,
+        )
 
         self._scheduled_counts = {section: 0 for section in self.sections}
+        self._scanned_counts = {section: 0 for section in self.sections}
         self._seen_ids: set[tuple[str, str]] = set()
 
     @staticmethod
@@ -193,14 +216,138 @@ class HuaxinSpider(BaseNoticeSpider):
             return default
 
     @staticmethod
-    def _parse_sections(value: str | None) -> tuple[str, ...]:
+    def _parse_boundary(value: str | None, *, end_of_day: bool) -> datetime | None:
+        raw = str(value or "").strip()
+        if not raw:
+            return None
+        parsed = coerce_datetime(raw)
+        if parsed is None:
+            raise ValueError(
+                f"无法解析日期时间 {raw!r}；请使用 YYYY-MM-DD 或 YYYY-MM-DD HH:MM:SS"
+            )
+        if end_of_day and len(raw) == 10:
+            return datetime.combine(parsed.date(), time.max)
+        return parsed
+
+    @classmethod
+    def _parse_time_window(
+        cls,
+        days: int | str | None,
+        start_date: str | None,
+        end_date: str | None,
+    ) -> tuple[datetime | None, datetime | None]:
+        end = cls._parse_boundary(end_date, end_of_day=True)
+        explicit_start = cls._parse_boundary(start_date, end_of_day=False)
+        if explicit_start is not None:
+            start = explicit_start
+        elif days not in (None, ""):
+            try:
+                count = int(days)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"days/lookback_days 必须是正整数，实际为 {days!r}"
+                ) from exc
+            if count <= 0:
+                raise ValueError("days/lookback_days 必须大于0")
+            effective_end = end or datetime.now()
+            start = effective_end - timedelta(days=count)
+        else:
+            start = None
+        if start is not None and end is not None and start > end:
+            raise ValueError("start_date 不能晚于 end_date")
+        return start, end
+
+    @staticmethod
+    def _record_publish_time(
+        section: str,
+        record: Mapping[str, Any],
+    ) -> datetime | None:
+        keys = (
+            ("releaseTime", "noticePlanSendTime", "publishTime", "createTime")
+            if section == "zbjh"
+            else ("releaseTime", "publishTime", "createTime", "updateTime")
+        )
+        for key in keys:
+            parsed = coerce_datetime(record.get(key))
+            if parsed is not None:
+                return parsed
+        return None
+
+    def _time_window_decision(
+        self,
+        section: str,
+        record: Mapping[str, Any],
+    ) -> tuple[bool, datetime | None, str]:
+        published = self._record_publish_time(section, record)
+        if published is None:
+            return True, None, "unknown"
+        if self.window_start is not None and published < self.window_start:
+            return False, published, "before_start"
+        if self.window_end is not None and published > self.window_end:
+            return False, published, "after_end"
+        return True, published, "inside"
+
+    def _page_reaches_start_boundary(
+        self,
+        section: str,
+        records: list[Any],
+    ) -> bool:
+        if self.window_start is None:
+            return False
+        dated = [
+            value
+            for record in records
+            if isinstance(record, Mapping)
+            and (value := self._record_publish_time(section, record)) is not None
+        ]
+        if not dated:
+            return False
+        descending = all(
+            dated[index] >= dated[index + 1]
+            for index in range(len(dated) - 1)
+        )
+        # 正常倒序页只要页尾越过开始时间即可停止；乱序页必须整页都早于开始时间，
+        # 防止置顶旧公告造成过早停止。
+        return (
+            descending and dated[-1] < self.window_start
+        ) or all(value < self.window_start for value in dated)
+
+    def _detail_is_in_window(
+        self,
+        section: str,
+        detail: Mapping[str, Any],
+        notice_id: str,
+    ) -> bool:
+        include, published, reason = self._time_window_decision(section, detail)
+        if include:
+            return True
+        crawler = getattr(self, "crawler", None)
+        if crawler is not None:
+            crawler.stats.inc_value(f"history/detail_skipped/{reason}")
+        self.logger.debug(
+            "[%s] 详情超出时间范围，跳过：id=%s publish_time=%s reason=%s",
+            section,
+            notice_id,
+            published,
+            reason,
+        )
+        return False
+
+    @classmethod
+    def _parse_sections(cls, value: str | None) -> tuple[str, ...]:
         if not value:
-            return config.DEFAULT_SECTIONS
+            return cls.site_config.DEFAULT_SECTIONS
         requested = tuple(dict.fromkeys(part.strip() for part in value.split(",") if part.strip()))
-        unknown = [section for section in requested if section not in config.SECTION_CLASSIFICATIONS]
+        unknown = [
+            section
+            for section in requested
+            if section not in cls.site_config.SECTION_CLASSIFICATIONS
+        ]
         if unknown:
-            valid = ", ".join(config.SECTION_CLASSIFICATIONS)
-            raise ValueError(f"未知华新栏目：{', '.join(unknown)}；可选值：{valid}")
+            valid = ", ".join(cls.site_config.SECTION_CLASSIFICATIONS)
+            raise ValueError(
+                f"未知{cls.platform_name}栏目：{', '.join(unknown)}；可选值：{valid}"
+            )
         return requested
 
     @property
@@ -208,32 +355,39 @@ class HuaxinSpider(BaseNoticeSpider):
         headers = {
             "Accept": "application/json, text/plain, */*",
             "Content-Type": "application/json;charset=UTF-8",
-            "Origin": config.API_ORIGIN,
-            "Referer": f"{config.API_ORIGIN}/",
+            "Origin": self.site_config.WEB_BASE_URL,
+            "Referer": f"{self.site_config.WEB_BASE_URL}/",
         }
         return headers
 
     async def start(self) -> Iterable[Request]:
+        self.logger.info(
+            "采集时间窗口：start=%s end=%s sections=%s page_size=%s",
+            self.window_start or "unbounded",
+            self.window_end or "now",
+            ",".join(self.sections),
+            self.page_size,
+        )
         for section in self.sections:
             yield self._list_request(section, page=1)
 
     def _list_request(self, section: str, page: int) -> JsonRequest:
         if section == "zbjh":
             return JsonRequest(
-                url=config.BID_PLAN_LIST_URL,
+                url=self.site_config.BID_PLAN_LIST_URL,
                 method="POST",
                 headers=self.api_headers,
-                data=config.build_bid_plan_list_payload(page, self.page_size),
+                data=self.site_config.build_bid_plan_list_payload(page, self.page_size),
                 callback=self.parse_list,
                 errback=self.on_list_error,
                 cb_kwargs={"section": section, "page": page},
                 dont_filter=True,
             )
         return JsonRequest(
-            url=config.ANNOUNCEMENT_LIST_URL,
+            url=self.site_config.ANNOUNCEMENT_LIST_URL,
             method="POST",
             headers=self.api_headers,
-            data=config.build_list_payload(section, page, self.page_size),
+            data=self.site_config.build_list_payload(section, page, self.page_size),
             callback=self.parse_list,
             errback=self.on_list_error,
             cb_kwargs={"section": section, "page": page},
@@ -270,11 +424,31 @@ class HuaxinSpider(BaseNoticeSpider):
             self.logger.error("[%s] 列表 records 类型异常：%s", section, type(records).__name__)
             return
 
+        boundary_reached = self._page_reaches_start_boundary(section, records)
+
         for record in records:
             if self._scheduled_counts[section] >= self.max_records:
                 break
             if not isinstance(record, Mapping):
                 continue
+            self._scanned_counts[section] += 1
+            include, record_time, time_reason = self._time_window_decision(
+                section,
+                record,
+            )
+            if not include:
+                crawler = getattr(self, "crawler", None)
+                if crawler is not None:
+                    crawler.stats.inc_value(
+                        f"history/list_skipped/{time_reason}"
+                    )
+                continue
+            if time_reason == "unknown":
+                self.logger.debug(
+                    "[%s] 列表记录缺少可解析发布时间，为避免漏数仍请求详情：%r",
+                    section,
+                    record,
+                )
             # 招标计划列表同时包含内部 planId（p...）和数值主键 id，详情路由只接受
             # 数值 id；普通公告则使用 annId。
             notice_id = self._list_record_id(section, record)
@@ -288,7 +462,10 @@ class HuaxinSpider(BaseNoticeSpider):
                 list_record=record,
                 notice_type=section,
                 title=str(record.get("annTitle") or record.get("planTitle") or ""),
-                publish_time=record.get("releaseTime") or record.get("createTime") or "",
+                publish_time=record_time
+                or record.get("releaseTime")
+                or record.get("createTime")
+                or "",
             )
 
             if not should_fetch:
@@ -309,6 +486,7 @@ class HuaxinSpider(BaseNoticeSpider):
         should_continue = (
             self._scheduled_counts[section] < self.max_records
             and page < self.max_pages
+            and not boundary_reached
             and bool(records)
             and len(records) >= self.page_size
             and (not total or page * self.page_size < total)
@@ -317,10 +495,26 @@ class HuaxinSpider(BaseNoticeSpider):
         if should_continue:
             yield self._list_request(section, page + 1)
         else:
+            if boundary_reached:
+                stop_reason = "time_boundary_reached"
+                crawler = getattr(self, "crawler", None)
+                if crawler is not None:
+                    crawler.stats.inc_value("history/time_boundary_stops")
+            elif self._scheduled_counts[section] >= self.max_records:
+                stop_reason = "max_records"
+            elif page >= self.max_pages:
+                stop_reason = "max_pages"
+            elif not records:
+                stop_reason = "empty_page"
+            else:
+                stop_reason = "source_exhausted"
             self.logger.info(
-                "[%s] 列表结束：page=%s scheduled=%s total=%s pages=%s",
+                "[%s] 列表结束：reason=%s page=%s scanned=%s scheduled=%s "
+                "total=%s pages=%s",
                 section,
+                stop_reason,
                 page,
+                self._scanned_counts[section],
                 self._scheduled_counts[section],
                 total or "unknown",
                 pages or "unknown",
@@ -348,10 +542,10 @@ class HuaxinSpider(BaseNoticeSpider):
         list_record: dict[str, Any],
     ) -> Request:
         if section == "zbjh":
-            url = f"{config.BID_PLAN_DETAIL_URL}/{notice_id}"
+            url = f"{self.site_config.BID_PLAN_DETAIL_URL}/{notice_id}"
             callback = self.parse_bid_plan_detail
         else:
-            url = f"{config.ANNOUNCEMENT_DETAIL_URL}?annId={notice_id}"
+            url = f"{self.site_config.ANNOUNCEMENT_DETAIL_URL}?annId={notice_id}"
             callback = self.parse_announcement_detail
         return Request(
             url=url,
@@ -381,6 +575,8 @@ class HuaxinSpider(BaseNoticeSpider):
         detail["_route_planid"] = notice_id
         detail.setdefault("annId", notice_id)
         self._merge_missing(detail, list_record)
+        if not self._detail_is_in_window(section, detail, notice_id):
+            return
         item = self._build_item(section, detail, source)
         if item is not None:
             yield self._start_attachment_resolution(item)
@@ -401,6 +597,8 @@ class HuaxinSpider(BaseNoticeSpider):
             return
         self._merge_missing(detail, list_record)
         detail.setdefault("annId", notice_id)
+        if not self._detail_is_in_window(section, detail, notice_id):
+            return
         item = self._build_item(section, detail, source)
         if item is not None:
             yield self._start_attachment_resolution(item)
@@ -409,7 +607,7 @@ class HuaxinSpider(BaseNoticeSpider):
         attachments = [dict(value) for value in item.get("attachments") or []]
         if (
             not attachments
-            or not self.settings.getbool("HUAXIN_RESOLVE_ATTACHMENT_URLS", True)
+            or not self.settings.getbool("NOTICE_RESOLVE_ATTACHMENT_URLS", True)
         ):
             return item
         return self._next_attachment_request(item, attachments, 0)
@@ -432,7 +630,7 @@ class HuaxinSpider(BaseNoticeSpider):
             attachments[index]["parse_status"] = "MISSING_SOURCE_FILE_ID"
             return self._next_attachment_request(item, attachments, index + 1)
         return Request(
-            url=f"{config.BIDDING_FILE_QUERY_URL}/{file_id}",
+            url=f"{self.site_config.BIDDING_FILE_QUERY_URL}/{file_id}",
             headers=self.api_headers,
             callback=self.parse_attachment_info,
             errback=self.on_attachment_error,
@@ -456,7 +654,7 @@ class HuaxinSpider(BaseNoticeSpider):
             # 预览 URL 时才回退 downloadUrl。
             raw_url = info.get("url") or info.get("downloadUrl") or ""
             attachment["file_url"] = (
-                urljoin(config.API_ORIGIN + "/", str(raw_url).strip())
+                urljoin(self.site_config.API_ORIGIN + "/", str(raw_url).strip())
                 if raw_url
                 else None
             )
@@ -482,7 +680,8 @@ class HuaxinSpider(BaseNoticeSpider):
         index = request.cb_kwargs["index"]
         attachments[index]["parse_status"] = "METADATA_REQUEST_FAILED"
         self.logger.warning(
-            "华新附件元数据请求失败：file_id=%s error=%s",
+            "%s附件元数据请求失败：file_id=%s error=%s",
+            self.platform_name,
             attachments[index].get("source_file_id"),
             failure.getErrorMessage(),
         )
@@ -522,7 +721,7 @@ class HuaxinSpider(BaseNoticeSpider):
         list_record: dict[str, Any],
     ) -> Request:
         return Request(
-            url=f"{config.INPUT_ANNOUNCEMENT_DETAIL_URL}?annId={notice_id}",
+            url=f"{self.site_config.INPUT_ANNOUNCEMENT_DETAIL_URL}?annId={notice_id}",
             headers=self.api_headers,
             callback=self.parse_announcement_detail,
             errback=self.on_detail_error,
@@ -547,16 +746,19 @@ class HuaxinSpider(BaseNoticeSpider):
         detail: dict[str, Any],
         source: str,
     ):
-        subtype, notice_type, data, attachments = HuaxinParser.parse(section, detail)
+        subtype, notice_type, data, attachments = self.parser_class.parse(
+            section, detail
+        )
         if not notice_type:
             self.logger.warning(
-                "无法识别华新公告类型：section=%s annId=%s title=%r",
+                "无法识别%s公告类型：section=%s annId=%s title=%r",
+                self.platform_name,
                 section,
                 detail.get("annId"),
                 detail.get("annTitle"),
             )
             return None
-        detail_url = HuaxinParser.detail_url(subtype, detail)
+        detail_url = self.parser_class.detail_url(subtype, detail)
         return self.build_notice_item(
             notice_type=notice_type,
             notice_subtype=subtype,
@@ -566,10 +768,10 @@ class HuaxinSpider(BaseNoticeSpider):
             detail_url=detail_url,
             data=data,
             raw_data={"detail_source": source, "detail": detail},
-            raw_html=HuaxinParser.raw_html(detail),
-            raw_text=HuaxinParser.raw_text(detail),
+            raw_html=self.parser_class.raw_html(detail),
+            raw_text=self.parser_class.raw_text(detail),
             parse_status="PARSED",
-            extraction_model="huaxin-rule-parser",
+            extraction_model=self.extraction_model_name,
             extraction_version=self.parser_version,
             is_verified=False,
             field_meta={"site_parser": self.parser_version, "detail_source": source},
@@ -582,7 +784,8 @@ class HuaxinSpider(BaseNoticeSpider):
     def on_list_error(self, failure):
         request = failure.request
         self.logger.error(
-            "华新列表请求失败：section=%s page=%s error=%s",
+            "%s列表请求失败：section=%s page=%s error=%s",
+            self.platform_name,
             request.cb_kwargs.get("section"),
             request.cb_kwargs.get("page"),
             failure.getErrorMessage(),
@@ -595,11 +798,16 @@ class HuaxinSpider(BaseNoticeSpider):
         notice_id = kwargs.get("notice_id", "")
         source = kwargs.get("source", "primary")
         if section != "zbjh" and source == "primary":
-            self.logger.info("华新主详情请求失败，切换备用接口：annId=%s", notice_id)
+            self.logger.info(
+                "%s主详情请求失败，切换备用接口：annId=%s",
+                self.platform_name,
+                notice_id,
+            )
             yield self._backup_detail_request(section, notice_id, kwargs.get("list_record", {}))
             return
         self.logger.warning(
-            "华新详情请求失败：section=%s annId=%s source=%s error=%s",
+            "%s详情请求失败：section=%s annId=%s source=%s error=%s",
+            self.platform_name,
             section,
             notice_id,
             source,

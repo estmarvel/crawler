@@ -87,6 +87,12 @@ class BaseNoticeSpider(scrapy.Spider):
             output_root=crawler.settings.get("NOTICE_OUTPUT_ROOT", "output"),
             platform_code=self.platform_code or self.name,
         )
+        if crawler.settings.getbool(
+            "NOTICE_DEDUP_SKIP_KNOWN_IDENTITIES",
+            False,
+        ) and store.has_identity(identity):
+            crawler.stats.inc_value("dedup/known_identities_skipped")
+            return False, list_fingerprint
         should_fetch = store.should_fetch_detail(identity, list_fingerprint)
         if not should_fetch:
             crawler.stats.inc_value("dedup/list_details_skipped")

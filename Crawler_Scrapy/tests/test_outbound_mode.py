@@ -13,6 +13,7 @@ from crawler_scrapy.spiders.huaxin import HuaxinSpider
 from crawler_scrapy.transport.access_guard import DirectAccessGuardMiddleware
 from crawler_scrapy.transport.proxy_middleware import StaticProxyMiddleware
 from crawler_scrapy.transport.proxy_pool import ProxyPoolConfigurationError
+from crawler_scrapy.transport.scrapy_compat import request_spider_close
 
 
 TIANQI_MIDDLEWARE = (
@@ -108,6 +109,37 @@ class OutboundModeTest(unittest.TestCase):
         with patch.dict(os.environ, {}, clear=True):
             with self.assertRaises(ProxyPoolConfigurationError):
                 StaticProxyMiddleware.from_crawler(crawler)
+
+
+class SpiderCloseCompatibilityTest(unittest.TestCase):
+    def test_engine_close_is_scheduled_without_waiting(self):
+        class Engine:
+            def __init__(self):
+                self.value = None
+
+            def close_spider(self, spider, reason="cancelled"):
+                self.value = (spider, reason)
+                return "scheduled"
+
+        spider = object()
+        engine = Engine()
+        result = request_spider_close(engine, spider, "static_proxy_unavailable")
+        self.assertEqual(result, "scheduled")
+        self.assertEqual(engine.value, (spider, "static_proxy_unavailable"))
+
+    def test_async_only_older_signature_is_supported(self):
+        class Engine:
+            def __init__(self):
+                self.value = None
+
+            async def close_spider_async(self, spider, reason="cancelled"):
+                self.value = (spider, reason)
+
+        spider = object()
+        engine = Engine()
+        deferred = request_spider_close(engine, spider, "direct_access_blocked")
+        self.assertIsNotNone(deferred)
+        self.assertEqual(engine.value, (spider, "direct_access_blocked"))
 
 
 if __name__ == "__main__":

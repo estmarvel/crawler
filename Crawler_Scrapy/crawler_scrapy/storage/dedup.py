@@ -30,6 +30,16 @@ VOLATILE_CONTENT_FIELDS = frozenset(
         "是否已核验",
     }
 )
+VOLATILE_LIST_FIELDS = frozenset(
+    {
+        # 浏览次数会因用户访问持续变化，但不代表公告正文或业务字段更新。
+        "clickTimes",
+        "clickCount",
+        "viewCount",
+        "browseCount",
+        "readCount",
+    }
+)
 
 
 def _json_value(value: Any) -> Any:
@@ -104,8 +114,13 @@ def build_list_fingerprint(record: Mapping[str, Any] | None) -> str:
 
     if not record:
         return ""
+    stable_record = {
+        key: value
+        for key, value in record.items()
+        if key not in VOLATILE_LIST_FIELDS
+    }
     payload = json.dumps(
-        _json_value(dict(record)),
+        _json_value(stable_record),
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
@@ -185,6 +200,12 @@ class JsonNoticeDedupStore:
     def identity_count(self) -> int:
         with self._lock:
             return len(self._state["identities"])
+
+    def has_identity(self, identity: str) -> bool:
+        """返回源站公告身份是否已经成功导出过。"""
+
+        with self._lock:
+            return identity in self._state["identities"]
 
     def should_fetch_detail(self, identity: str, list_fingerprint: str) -> bool:
         """新公告或列表记录发生变化时请求详情；旧索引无列表指纹时复查一次。"""

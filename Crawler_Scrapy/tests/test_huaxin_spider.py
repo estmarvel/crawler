@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, time
 from types import SimpleNamespace
 import unittest
 
@@ -14,6 +15,215 @@ from crawler_scrapy.spiders.huaxin import HuaxinSpider
 
 
 class HuaxinSpiderRequestTest(unittest.TestCase):
+    def test_missing_time_window_enables_full_history_pagination(self):
+        spider = HuaxinSpider(
+            sections="hxr",
+            page_size=2,
+            max_records=20,
+            max_pages=20,
+        )
+        self.assertIsNone(spider.window_start)
+        self.assertIsNone(spider.window_end)
+
+        request = spider._list_request("hxr", 1)
+        response = TextResponse(
+            url=request.url,
+            request=request,
+            encoding="utf-8",
+            body=json.dumps(
+                {
+                    "code": 200,
+                    "data": {
+                        "records": [
+                            {"annId": "old-1", "releaseTime": "2020-01-02"},
+                            {"annId": "old-2", "releaseTime": "2020-01-01"},
+                        ],
+                        "total": 4,
+                        "pages": 2,
+                    },
+                }
+            ).encode("utf-8"),
+        )
+
+        requests = list(spider.parse_list(response, "hxr", 1))
+
+        self.assertEqual(
+            [value.cb_kwargs.get("notice_id") for value in requests[:2]],
+            ["old-1", "old-2"],
+        )
+        self.assertEqual(requests[-1].cb_kwargs.get("page"), 2)
+
+    def test_explicit_history_window_is_parsed_and_validated(self):
+        spider = HuaxinSpider(
+            sections="hxr",
+            start_date="2026-01-01",
+            end_date="2026-06-30",
+        )
+        self.assertEqual(spider.window_start, datetime(2026, 1, 1))
+        self.assertEqual(
+            spider.window_end,
+            datetime.combine(datetime(2026, 6, 30).date(), time.max),
+        )
+        with self.assertRaises(ValueError):
+            HuaxinSpider(sections="hxr", days="0")
+        with self.assertRaises(ValueError):
+            HuaxinSpider(
+                sections="hxr",
+                start_date="2026-07-01",
+                end_date="2026-06-30",
+            )
+
+    def test_history_page_filters_records_and_stops_at_time_boundary(self):
+        spider = HuaxinSpider(
+            sections="hxr",
+            page_size=3,
+            max_records=20,
+            max_pages=20,
+            start_date="2026-01-01",
+            end_date="2026-06-30",
+        )
+        request = spider._list_request("hxr", 1)
+        response = TextResponse(
+            url=request.url,
+            request=request,
+            encoding="utf-8",
+            body=json.dumps(
+                {
+                    "code": 200,
+                    "data": {
+                        "records": [
+                            {
+                                "annId": "future",
+                                "releaseTime": "2026-07-01 00:00:00",
+                            },
+                            {
+                                "annId": "inside",
+                                "releaseTime": "2026-06-15 12:00:00",
+                            },
+                            {
+                                "annId": "old",
+                                "releaseTime": "2025-12-31 23:59:59",
+                            },
+                        ],
+                        "total": 100,
+                        "pages": 34,
+                    },
+                }
+            ).encode("utf-8"),
+        )
+
+        requests = list(spider.parse_list(response, "hxr", 1))
+
+        self.assertEqual(len(requests), 1)
+        self.assertEqual(requests[0].cb_kwargs["notice_id"], "inside")
+        self.assertEqual(spider._scanned_counts["hxr"], 3)
+
+    def test_unsorted_old_record_does_not_stop_history_pagination(self):
+        spider = HuaxinSpider(
+            sections="hxr",
+            page_size=3,
+            max_records=20,
+            max_pages=20,
+            start_date="2026-01-01",
+        )
+        request = spider._list_request("hxr", 1)
+        response = TextResponse(
+            url=request.url,
+            request=request,
+            encoding="utf-8",
+            body=json.dumps(
+                {
+                    "code": 200,
+                    "data": {
+                        "records": [
+                            {
+                                "annId": "pinned-old",
+                                "releaseTime": "2025-12-01 00:00:00",
+                            },
+                            {
+                                "annId": "new-1",
+                                "releaseTime": "2026-06-15 00:00:00",
+                            },
+                            {
+                                "annId": "new-2",
+                                "releaseTime": "2026-05-15 00:00:00",
+                            },
+                        ],
+                        "total": 6,
+                        "pages": 2,
+                    },
+                }
+            ).encode("utf-8"),
+        )
+
+        requests = list(spider.parse_list(response, "hxr", 1))
+
+        detail_ids = [
+            value.cb_kwargs["notice_id"]
+            for value in requests
+            if "notice_id" in value.cb_kwargs
+        ]
+        next_pages = [
+            value.cb_kwargs["page"]
+            for value in requests
+            if "page" in value.cb_kwargs
+        ]
+        self.assertEqual(detail_ids, ["new-1", "new-2"])
+        self.assertEqual(next_pages, [2])
+
+    def test_short_category_stops_after_source_is_exhausted(self):
+        spider = HuaxinSpider(
+            sections="gs",
+            page_size=5,
+            max_records=20,
+            max_pages=20,
+            start_date="2025-01-01",
+        )
+        request = spider._list_request("gs", 1)
+        response = TextResponse(
+            url=request.url,
+            request=request,
+            encoding="utf-8",
+            body=json.dumps(
+                {
+                    "code": 200,
+                    "data": {
+                        "records": [
+                            {"annId": "result-1", "releaseTime": "2026-06-01"},
+                            {"annId": "result-2", "releaseTime": "2026-05-01"},
+                        ],
+                        "total": 2,
+                        "pages": 1,
+                    },
+                }
+            ).encode("utf-8"),
+        )
+
+        requests = list(spider.parse_list(response, "gs", 1))
+
+        self.assertEqual(
+            [value.cb_kwargs.get("notice_id") for value in requests],
+            ["result-1", "result-2"],
+        )
+        self.assertFalse(any("page" in value.cb_kwargs for value in requests))
+
+    def test_bid_plan_history_uses_frontend_release_time(self):
+        published = HuaxinSpider._record_publish_time(
+            "zbjh",
+            {
+                "createTime": "2025-01-01 00:00:00",
+                "releaseTime": "2026-06-01 12:00:00",
+            },
+        )
+        self.assertEqual(published, datetime(2026, 6, 1, 12, 0, 0))
+
+    def test_huaxin_disables_snapshots_but_keeps_attachment_downloads(self):
+        self.assertIs(HuaxinSpider.custom_settings["NOTICE_SNAPSHOT_ENABLED"], False)
+        self.assertIs(
+            HuaxinSpider.custom_settings["NOTICE_ATTACHMENT_DOWNLOAD_ENABLED"],
+            True,
+        )
+
     def test_bid_plan_list_uses_frontend_endpoint_and_payload(self):
         spider = HuaxinSpider(sections="zbjh", page_size=20)
         request = spider._list_request("zbjh", 3)
