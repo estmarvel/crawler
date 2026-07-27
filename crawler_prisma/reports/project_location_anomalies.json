@@ -1,0 +1,148 @@
+{
+  "generatedAt": "2026-07-24T05:42:31.667Z",
+  "rule": "只识别山西省及其11个地级市；按从左到右第一个包含城市的“|”分段取值；该分段内以“、”并列的城市全部保存。",
+  "projectCount": 930,
+  "countsByStatus": {
+    "MATCHED": 925,
+    "UNMATCHED": 3,
+    "PROVINCE_ONLY": 2
+  },
+  "anomalyCount": 5,
+  "projects": [
+    {
+      "projectCode": null,
+      "projectName": "吕梁市国家储备林及林业扶贫项目“吕梁新区两侧可视山体绿化项目”集约人工林栽培工程（离石段）施工",
+      "locationText": "离石区西属巴街道办和城北街道办",
+      "provinceToWrite": null,
+      "cityToWrite": null,
+      "status": "UNMATCHED",
+      "reason": "未识别到山西省或山西省地级市，不从县区、道路或描述性地址猜测",
+      "cityCandidates": [],
+      "sourceLocationValues": [
+        "离石区西属巴街道办和城北街道办"
+      ],
+      "detailPageLinks": [
+        "https://www.bjjbkj.cn/#/biddingplan?planid=9"
+      ],
+      "relatedNotices": [
+        {
+          "rawNoticeId": "2700",
+          "sourceNoticeId": "9",
+          "noticeType": "招标计划",
+          "title": "吕梁市国家储备林及林业扶贫项目“吕梁新区两侧可视山体绿化项目”集约人工林栽培工程（离石段）施工招标计划",
+          "locationText": "离石区西属巴街道办和城北街道办",
+          "detailPageUrl": "https://www.bjjbkj.cn/#/biddingplan?planid=9"
+        }
+      ],
+      "noticeCount": 1
+    },
+    {
+      "projectCode": null,
+      "projectName": "祁县经济开发区200MW/400MWh新型独立储能项目",
+      "locationText": "山西祁县经济开发区朝阳东街23号",
+      "provinceToWrite": "山西省",
+      "cityToWrite": null,
+      "status": "PROVINCE_ONLY",
+      "reason": "识别到山西省，但未识别到明确地级市",
+      "cityCandidates": [],
+      "sourceLocationValues": [
+        "山西祁县经济开发区朝阳东街23号"
+      ],
+      "detailPageLinks": [
+        "https://www.bjjbkj.cn/#/biddingplan?planid=10"
+      ],
+      "relatedNotices": [
+        {
+          "rawNoticeId": "2702",
+          "sourceNoticeId": "10",
+          "noticeType": "招标计划",
+          "title": "祁县经济开发区200MW/400MWh新型独立储能项目招标计划",
+          "locationText": "山西祁县经济开发区朝阳东街23号",
+          "detailPageUrl": "https://www.bjjbkj.cn/#/biddingplan?planid=10"
+        }
+      ],
+      "noticeCount": 1
+    },
+    {
+      "projectCode": null,
+      "projectName": "山西平遥液化天然气有限责任公司新建35KV变电工程及配套设施项目",
+      "locationText": "平遥县段村镇西安社村",
+      "provinceToWrite": null,
+      "cityToWrite": null,
+      "status": "UNMATCHED",
+      "reason": "未识别到山西省或山西省地级市，不从县区、道路或描述性地址猜测",
+      "cityCandidates": [],
+      "sourceLocationValues": [
+        "平遥县段村镇西安社村"
+      ],
+      "detailPageLinks": [
+        "https://www.ygcgpt.com/#/biddingplan?planid=13"
+      ],
+      "relatedNotices": [
+        {
+          "rawNoticeId": "1",
+          "sourceNoticeId": "13",
+          "noticeType": "招标计划",
+          "title": "山西平遥液化天然气有限责任公司新建35KV变电工程及配套设施项目招标计划",
+          "locationText": "平遥县段村镇西安社村",
+          "detailPageUrl": "https://www.ygcgpt.com/#/biddingplan?planid=13"
+        }
+      ],
+      "noticeCount": 1
+    },
+    {
+      "projectCode": null,
+      "projectName": "神安线盂县连接线项目",
+      "locationText": "新建分输站位于西烟循环经济产业园东北角，管线起于南刘咀村终黄龙凹村长2.9km",
+      "provinceToWrite": null,
+      "cityToWrite": null,
+      "status": "UNMATCHED",
+      "reason": "未识别到山西省或山西省地级市，不从县区、道路或描述性地址猜测",
+      "cityCandidates": [],
+      "sourceLocationValues": [
+        "新建分输站位于西烟循环经济产业园东北角，管线起于南刘咀村终黄龙凹村长2.9km"
+      ],
+      "detailPageLinks": [
+        "https://www.bjjbkj.cn/#/biddingplan?planid=2"
+      ],
+      "relatedNotices": [
+        {
+          "rawNoticeId": "2694",
+          "sourceNoticeId": "2",
+          "noticeType": "招标计划",
+          "title": "神安线盂县连接线项目招标计划",
+          "locationText": "新建分输站位于西烟循环经济产业园东北角，管线起于南刘咀村终黄龙凹村长2.9km",
+          "detailPageUrl": "https://www.bjjbkj.cn/#/biddingplan?planid=2"
+        }
+      ],
+      "noticeCount": 1
+    },
+    {
+      "projectCode": null,
+      "projectName": "沿黄沟壑区(临县段)植被恢复与退化草地修复项目",
+      "locationText": "山西省临县克虎镇、八堡乡、雷家碛乡、兔坂镇乡（镇）域内",
+      "provinceToWrite": "山西省",
+      "cityToWrite": null,
+      "status": "PROVINCE_ONLY",
+      "reason": "识别到山西省，但未识别到明确地级市",
+      "cityCandidates": [],
+      "sourceLocationValues": [
+        "山西省临县克虎镇、八堡乡、雷家碛乡、兔坂镇乡（镇）域内"
+      ],
+      "detailPageLinks": [
+        "https://www.bjjbkj.cn/#/biddingplan?planid=1"
+      ],
+      "relatedNotices": [
+        {
+          "rawNoticeId": "2693",
+          "sourceNoticeId": "1",
+          "noticeType": "招标计划",
+          "title": "沿黄沟壑区(临县段)植被恢复与退化草地修复项目招标计划",
+          "locationText": "山西省临县克虎镇、八堡乡、雷家碛乡、兔坂镇乡（镇）域内",
+          "detailPageUrl": "https://www.bjjbkj.cn/#/biddingplan?planid=1"
+        }
+      ],
+      "noticeCount": 1
+    }
+  ]
+}

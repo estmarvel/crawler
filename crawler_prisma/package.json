@@ -4,6 +4,13 @@
   "description": "",
   "main": "index.js",
   "scripts": {
+    "build:project-mappings": "node scripts/import_projects.js",
+    "import:projects": "node scripts/import_projects.js",
+    "import:project-notices": "node scripts/import_project_notices.js",
+    "import:project-notice-attachments": "node scripts/import_project_notice_attachments.js",
+    "import:notice-extractions": "node scripts/import_notice_extractions.js",
+    "import:raw-notice-attachments": "node scripts/import_raw_notice_attachments.js",
+    "import:raw-notices": "node scripts/import_raw_notices.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],

@@ -62,7 +62,7 @@ model CompanyAlias {
 
 model Project {
   id                     Int                      @id @default(autoincrement())
-  projectCode            String?                  @map("project_code")
+  projectCode            String?                  @unique @map("project_code")
   projectName            String                   @map("project_name")
   projectNature          String?                  @map("project_nature")
   industry               String?
@@ -141,6 +141,7 @@ model ProjectNotice {
   requirements      ProjectRequirement[]
   contracts         Contract[]
 
+  @@unique([sourceSite, sourceNoticeId], map: "project_notice_source_identity")
   @@index([projectId])
   @@index([noticeType])
   @@index([publishDate])
@@ -241,18 +242,20 @@ model CompanyProfileSnapshot {
 }
 
 model DataSource {
-  id                    Int         @id @default(autoincrement())
-  name                  String      @db.VarChar(200)
-  shortCode             String      @unique @map("short_code") @db.VarChar(32)
-  baseUrl               String?     @map("base_url") @db.VarChar(512)
-  sourceLevel           String?     @map("source_level") @db.VarChar(32)
-  province              String?     @db.VarChar(32)
-  crawlFrequencyMinutes Int         @default(60) @map("crawl_frequency_minutes")
-  crawlConfig           Json?       @map("crawl_config")
-  isEnabled             Boolean     @default(true) @map("is_enabled")
-  createdAt             DateTime    @default(now()) @map("created_at")
-  updatedAt             DateTime    @updatedAt @map("updated_at")
+  id                    Int              @id @default(autoincrement())
+  name                  String           @db.VarChar(200)
+  shortCode             String           @unique @map("short_code") @db.VarChar(32)
+  baseUrl               String?          @map("base_url") @db.VarChar(512)
+  sourceLevel           String?          @map("source_level") @db.VarChar(32)
+  province              String?          @db.VarChar(32)
+  crawlFrequencyMinutes Int              @default(60) @map("crawl_frequency_minutes")
+  crawlConfig           Json?            @map("crawl_config")
+  isEnabled             Boolean          @default(true) @map("is_enabled")
+  createdAt             DateTime         @default(now()) @map("created_at")
+  updatedAt             DateTime         @updatedAt @map("updated_at")
   crawlTasks            CrawlTask[]
+  crawlSchedules        CrawlSchedule[]
+  crawlExceptions       CrawlException[]
   rawNotices            RawNotice[]
 
   @@index([isEnabled])
@@ -260,24 +263,133 @@ model DataSource {
 }
 
 model CrawlTask {
-  id           BigInt      @id @default(autoincrement())
-  dataSourceId Int         @map("data_source_id")
-  taskType     String      @map("task_type") @db.VarChar(32)
-  status       String      @default("PENDING") @db.VarChar(32)
-  scheduledAt  DateTime?   @map("scheduled_at")
-  startedAt    DateTime?   @map("started_at")
-  finishedAt   DateTime?   @map("finished_at")
-  totalCount   Int         @default(0) @map("total_count")
-  successCount Int         @default(0) @map("success_count")
-  failCount    Int         @default(0) @map("fail_count")
-  errorMessage String?     @map("error_message") @db.Text
-  createdAt    DateTime    @default(now()) @map("created_at")
-  dataSource   DataSource  @relation(fields: [dataSourceId], references: [id])
-  rawNotices   RawNotice[]
+  id                BigInt            @id @default(autoincrement())
+  dataSourceId      Int               @map("data_source_id")
+  taskType          String            @map("task_type") @db.VarChar(32)
+  status            String            @default("PENDING") @db.VarChar(32)
+  scheduledAt       DateTime?         @map("scheduled_at")
+  startedAt         DateTime?         @map("started_at")
+  finishedAt        DateTime?         @map("finished_at")
+  totalCount        Int               @default(0) @map("total_count")
+  successCount      Int               @default(0) @map("success_count")
+  failCount         Int               @default(0) @map("fail_count")
+  errorMessage      String?           @map("error_message") @db.Text
+  scheduleId        Int?              @map("schedule_id")
+  runConfig         Json?             @map("run_config")
+  processPid        Int?              @map("process_pid")
+  logPath           String?           @map("log_path") @db.VarChar(1024)
+  outputPath        String?           @map("output_path") @db.VarChar(1024)
+  cancelRequestedAt DateTime?         @map("cancel_requested_at")
+  createdAt         DateTime          @default(now()) @map("created_at")
+  dataSource        DataSource        @relation(fields: [dataSourceId], references: [id])
+  schedule          CrawlSchedule?    @relation(fields: [scheduleId], references: [id], onDelete: SetNull)
+  rawNotices        RawNotice[]
+  events            CrawlTaskEvent[]
+  exceptions        CrawlException[]
+  stages            CrawlTaskStage[]
+  noticeOccurrences CrawlTaskNotice[]
 
   @@index([dataSourceId, status])
   @@index([status, scheduledAt])
+  @@index([scheduleId])
   @@map("crawl_task")
+}
+
+model CrawlSchedule {
+  id              Int         @id @default(autoincrement())
+  dataSourceId    Int         @map("data_source_id")
+  name            String      @db.VarChar(128)
+  taskType        String      @map("task_type") @db.VarChar(32)
+  intervalMinutes Int         @map("interval_minutes")
+  runConfig       Json?       @map("run_config")
+  isEnabled       Boolean     @default(true) @map("is_enabled")
+  nextRunAt       DateTime    @map("next_run_at")
+  lastRunAt       DateTime?   @map("last_run_at")
+  createdAt       DateTime    @default(now()) @map("created_at")
+  updatedAt       DateTime    @updatedAt @map("updated_at")
+  dataSource      DataSource  @relation(fields: [dataSourceId], references: [id])
+  tasks           CrawlTask[]
+
+  @@index([isEnabled, nextRunAt])
+  @@index([dataSourceId])
+  @@map("crawl_schedule")
+}
+
+model CrawlTaskEvent {
+  id          BigInt    @id @default(autoincrement())
+  crawlTaskId BigInt    @map("crawl_task_id")
+  level       String    @default("INFO") @db.VarChar(16)
+  eventType   String    @map("event_type") @db.VarChar(32)
+  message     String    @db.Text
+  detail      Json?
+  createdAt   DateTime  @default(now()) @map("created_at")
+  crawlTask   CrawlTask @relation(fields: [crawlTaskId], references: [id], onDelete: Cascade)
+
+  @@index([crawlTaskId, createdAt])
+  @@map("crawl_task_event")
+}
+
+model CrawlTaskStage {
+  id           BigInt    @id @default(autoincrement())
+  crawlTaskId  BigInt    @map("crawl_task_id")
+  stage        String    @db.VarChar(32)
+  status       String    @default("PENDING") @db.VarChar(32)
+  inputCount   Int       @default(0) @map("input_count")
+  successCount Int       @default(0) @map("success_count")
+  skippedCount Int       @default(0) @map("skipped_count")
+  failedCount  Int       @default(0) @map("failed_count")
+  errorMessage String?   @map("error_message") @db.Text
+  metadata     Json?
+  startedAt    DateTime? @map("started_at")
+  finishedAt   DateTime? @map("finished_at")
+  createdAt    DateTime  @default(now()) @map("created_at")
+  updatedAt    DateTime  @updatedAt @map("updated_at")
+  crawlTask    CrawlTask @relation(fields: [crawlTaskId], references: [id], onDelete: Cascade)
+
+  @@unique([crawlTaskId, stage])
+  @@index([stage, status])
+  @@map("crawl_task_stage")
+}
+
+model CrawlTaskNotice {
+  id           BigInt    @id @default(autoincrement())
+  crawlTaskId  BigInt    @map("crawl_task_id")
+  rawNoticeId  BigInt    @map("raw_notice_id")
+  isNew        Boolean   @default(false) @map("is_new")
+  isUpdated    Boolean   @default(false) @map("is_updated")
+  contentHash  String?   @map("content_hash") @db.VarChar(64)
+  discoveredAt DateTime  @default(now()) @map("discovered_at")
+  crawlTask    CrawlTask @relation(fields: [crawlTaskId], references: [id], onDelete: Cascade)
+  rawNotice    RawNotice @relation(fields: [rawNoticeId], references: [id], onDelete: Cascade)
+
+  @@unique([crawlTaskId, rawNoticeId])
+  @@index([rawNoticeId])
+  @@map("crawl_task_notice")
+}
+
+model CrawlException {
+  id            BigInt     @id @default(autoincrement())
+  dataSourceId  Int        @map("data_source_id")
+  crawlTaskId   BigInt?    @map("crawl_task_id")
+  exceptionType String     @map("exception_type") @db.VarChar(32)
+  sourceType    String     @map("source_type") @db.VarChar(32)
+  sourceRef     String     @map("source_ref") @db.VarChar(256)
+  message       String     @db.Text
+  status        String     @default("OPEN") @db.VarChar(32)
+  retryCount    Int        @default(0) @map("retry_count")
+  handledBy     String?    @map("handled_by") @db.VarChar(128)
+  remark        String?    @db.Text
+  resolvedAt    DateTime?  @map("resolved_at")
+  createdAt     DateTime   @default(now()) @map("created_at")
+  updatedAt     DateTime   @updatedAt @map("updated_at")
+  dataSource    DataSource @relation(fields: [dataSourceId], references: [id])
+  crawlTask     CrawlTask? @relation(fields: [crawlTaskId], references: [id], onDelete: SetNull)
+
+  @@unique([sourceType, sourceRef, exceptionType])
+  @@index([status, createdAt])
+  @@index([dataSourceId])
+  @@index([crawlTaskId])
+  @@map("crawl_exception")
 }
 
 model RawNotice {
@@ -298,6 +410,7 @@ model RawNotice {
   crawlTask         CrawlTask?            @relation(fields: [crawlTaskId], references: [id])
   attachments       RawNoticeAttachment[]
   extractionResults NoticeExtraction[]
+  taskOccurrences   CrawlTaskNotice[]
 
   @@unique([dataSourceId, sourceNoticeId])
   @@index([parseStatus])
@@ -343,6 +456,7 @@ model NoticeExtraction {
   rawNotice         RawNotice      @relation(fields: [rawNoticeId], references: [id])
   projectNotice     ProjectNotice? @relation(fields: [projectNoticeId], references: [id])
 
+  @@unique([rawNoticeId, extractionModel, extractionVersion], map: "notice_extraction_model_version")
   @@index([rawNoticeId])
   @@index([projectNoticeId])
   @@index([noticeType, isVerified])
