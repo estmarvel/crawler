@@ -104,37 +104,35 @@ class HuaxinSpider(BaseNoticeSpider):
 
     @classmethod
     def update_settings(cls, settings) -> None:
-        """默认使用固定认证代理；只允许固定代理或天启代理，禁止服务器直连。"""
+        """选择受保护直连、固定代理或天启代理出口。"""
 
         super().update_settings(settings)
         mode = str(settings.get("CRAWLER_OUTBOUND_MODE", "static")).strip().lower()
         if mode == "tianqi":
             return
-        if mode == "direct":
+        if mode not in {"direct", "static"}:
             raise ValueError(
-                f"{cls.platform_name}出口策略禁止 direct，任何情况下都不得使用服务器公网 IP"
-            )
-        if mode != "static":
-            raise ValueError(
-                f"不支持的 CRAWLER_OUTBOUND_MODE={mode!r}；可选 static/tianqi"
+                f"不支持的 CRAWLER_OUTBOUND_MODE={mode!r}；可选 direct/static/tianqi"
             )
 
         middlewares = settings.getdict("DOWNLOADER_MIDDLEWARES")
         middlewares[
             "crawler_scrapy.transport.proxy_middleware.TianqiProxyMiddleware"
         ] = None
-        middlewares[
+        static_middleware = (
             "crawler_scrapy.transport.proxy_middleware.StaticProxyMiddleware"
-        ] = 610
+        )
+        middlewares[static_middleware] = 610 if mode == "static" else None
         middlewares[
             "crawler_scrapy.transport.access_guard.DirectAccessGuardMiddleware"
         ] = 650
         settings.set("DOWNLOADER_MIDDLEWARES", middlewares, priority="spider")
 
         settings.set("TIANQI_PROXY_ENABLED", False, priority="spider")
-        settings.set("STATIC_PROXY_ENABLED", True, priority="spider")
-        # Scrapy 内置 HttpProxyMiddleware 负责通过固定代理建立 HTTPS CONNECT。
-        settings.set("HTTPPROXY_ENABLED", True, priority="spider")
+        settings.set("STATIC_PROXY_ENABLED", mode == "static", priority="spider")
+        # direct 明确关闭 HttpProxyMiddleware，避免继承宿主机 HTTP_PROXY；static
+        # 则由它负责建立带认证的 HTTPS CONNECT。
+        settings.set("HTTPPROXY_ENABLED", mode == "static", priority="spider")
         settings.set(
             "CONCURRENT_REQUESTS",
             settings.getint("DIRECT_CONCURRENT_REQUESTS", 2),

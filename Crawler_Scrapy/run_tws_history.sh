@@ -5,6 +5,7 @@ set -Eeuo pipefail
 PROJECT_DIR="/home/intsig/Crawler_Scrapy"
 CONDA_BIN="/home/vipuser/miniconda3/bin/conda"
 OUTPUT_ROOT="${PROJECT_DIR}/output"
+DEDUP_ROOT=""
 LOOKBACK_DAYS="180"
 DAYS_EXPLICIT="false"
 ALL_HISTORY="false"
@@ -15,10 +16,13 @@ SECTIONS="zbgg_zys,hxr,gs,zbjh"
 PAGE_SIZE="100"
 MAX_RECORDS="1000000"
 MAX_PAGES="10000"
+OUTBOUND_MODE="${CRAWLER_OUTBOUND_MODE:-direct}"
 
 usage() {
     echo "用法：$0 [--all | --days N | --start-date YYYY-MM-DD [--end-date YYYY-MM-DD]]"
-    echo "          [--sites huaxin,jiubang] [--sections 栏目列表] [--output-root 路径]"
+    echo "          [--sites huaxin,jiubang] [--sections 栏目列表] [--output-root 路径] [--dedup-root 路径]"
+    echo "          [--page-size N] [--max-records N] [--max-pages N]"
+    echo "          [--outbound-mode direct|static|tianqi]"
     echo
     echo "默认并行采集华新和玖邦最近180天的四个栏目。"
     echo "--all 从最新页一直翻到各栏目最后一页，补采源站全部历史公告。"
@@ -69,6 +73,31 @@ while [[ $# -gt 0 ]]; do
             OUTPUT_ROOT="$2"
             shift 2
             ;;
+        --dedup-root)
+            require_value "$@"
+            DEDUP_ROOT="$2"
+            shift 2
+            ;;
+        --page-size)
+            require_value "$@"
+            PAGE_SIZE="$2"
+            shift 2
+            ;;
+        --max-records)
+            require_value "$@"
+            MAX_RECORDS="$2"
+            shift 2
+            ;;
+        --max-pages)
+            require_value "$@"
+            MAX_PAGES="$2"
+            shift 2
+            ;;
+        --outbound-mode)
+            require_value "$@"
+            OUTBOUND_MODE="$2"
+            shift 2
+            ;;
         -h|--help)
             usage
             exit 0
@@ -81,6 +110,15 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+if [[ "${OUTBOUND_MODE}" != "direct" && "${OUTBOUND_MODE}" != "static" && "${OUTBOUND_MODE}" != "tianqi" ]]; then
+    echo "--outbound-mode 只支持 direct、static 或 tianqi" >&2
+    exit 2
+fi
+
+if [[ -z "${DEDUP_ROOT}" ]]; then
+    DEDUP_ROOT="${OUTPUT_ROOT}"
+fi
+
 if [[ "${ALL_HISTORY}" == "true" ]] && \
    { [[ "${DAYS_EXPLICIT}" == "true" ]] || [[ -n "${START_DATE}" ]] || [[ -n "${END_DATE}" ]]; }; then
     echo "--all 不能与 --days、--start-date 或 --end-date 同时使用" >&2
@@ -91,6 +129,17 @@ if [[ "${ALL_HISTORY}" != "true" ]] && ! [[ "${LOOKBACK_DAYS}" =~ ^[1-9][0-9]*$ 
     echo "--days 必须是正整数" >&2
     exit 2
 fi
+
+if ! [[ "${PAGE_SIZE}" =~ ^[1-9][0-9]*$ ]] || (( PAGE_SIZE > 100 )); then
+    echo "--page-size 必须是 1 到 100 的整数" >&2
+    exit 2
+fi
+for numeric_value in "${MAX_RECORDS}" "${MAX_PAGES}"; do
+    if ! [[ "${numeric_value}" =~ ^[1-9][0-9]*$ ]]; then
+        echo "--max-records 和 --max-pages 必须是正整数" >&2
+        exit 2
+    fi
+done
 
 IFS=',' read -r -a SITE_ARRAY <<< "${SITES}"
 if [[ ${#SITE_ARRAY[@]} -eq 0 ]]; then
@@ -104,11 +153,51 @@ for site in "${SITE_ARRAY[@]}"; do
     fi
 done
 
-# 当前固定认证代理；允许部署环境覆盖。代理不可用时Spider会立即停止，绝不直连。
-export HUAXIN_PROXY_ENDPOINT="${HUAXIN_PROXY_ENDPOINT:-http://210.51.27.8:10000}"
-export HUAXIN_PROXY_USERNAME="${HUAXIN_PROXY_USERNAME:-b88dff}"
-export HUAXIN_PROXY_PASSWORD="${HUAXIN_PROXY_PASSWORD:-6dc46456}"
+# 复用 Spider 已实现的 static/tianqi 两种强制代理模式。任一模式配置失败都
+# 立即结束，禁止回退服务器真实 IP。
+if [[ "${OUTBOUND_MODE}" == "static" ]]; then
+    export HUAXIN_PROXY_ENDPOINT="${HUAXIN_PROXY_ENDPOINT:-http://210.51.27.8:10000}"
+    if [[ -z "${HUAXIN_PROXY_USERNAME:-}" || -z "${HUAXIN_PROXY_PASSWORD:-}" ]]; then
+        echo "缺少 HUAXIN_PROXY_USERNAME 或 HUAXIN_PROXY_PASSWORD，拒绝启动以避免直连" >&2
+        exit 2
+    fi
+    export HUAXIN_PROXY_USERNAME HUAXIN_PROXY_PASSWORD
+elif [[ "${OUTBOUND_MODE}" == "tianqi" ]]; then
+    if [[ -z "${TIANQI_SECRET:-}" || -z "${TIANQI_SIGN:-}" ]]; then
+        echo "缺少 TIANQI_SECRET 或 TIANQI_SIGN，拒绝启动以避免直连" >&2
+        exit 2
+    fi
+    export TIANQI_SECRET TIANQI_SIGN
+fi
 export PYTHONUNBUFFERED=1
+
+if [[ "${OUTBOUND_MODE}" == "direct" ]]; then
+    RUN_CONCURRENT_REQUESTS=1
+    RUN_CONCURRENT_PER_DOMAIN=1
+    RUN_DOWNLOAD_DELAY=5.0
+    RUN_AUTOTHROTTLE_START_DELAY=5.0
+    RUN_AUTOTHROTTLE_TARGET_CONCURRENCY=0.25
+    RUN_AUTOTHROTTLE_MAX_DELAY=120.0
+    RUN_RETRY_TIMES=0
+    RUN_MAX_RESPONSES=200
+    RUN_GUARD_CONSECUTIVE_LIMIT=1
+    RUN_GUARD_TOTAL_LIMIT=2
+    RUN_GUARD_BASE_BACKOFF=120.0
+    RUN_GUARD_MAX_BACKOFF=900.0
+else
+    RUN_CONCURRENT_REQUESTS=4
+    RUN_CONCURRENT_PER_DOMAIN=2
+    RUN_DOWNLOAD_DELAY=2.0
+    RUN_AUTOTHROTTLE_START_DELAY=3.0
+    RUN_AUTOTHROTTLE_TARGET_CONCURRENCY=1.0
+    RUN_AUTOTHROTTLE_MAX_DELAY=60.0
+    RUN_RETRY_TIMES=2
+    RUN_MAX_RESPONSES=1000000
+    RUN_GUARD_CONSECUTIVE_LIMIT=2
+    RUN_GUARD_TOTAL_LIMIT=4
+    RUN_GUARD_BASE_BACKOFF=60.0
+    RUN_GUARD_MAX_BACKOFF=600.0
+fi
 
 RUN_ID="$(date '+%Y%m%d_%H%M%S')"
 LOG_ROOT="${OUTPUT_ROOT}/logs/${RUN_ID}"
@@ -148,9 +237,16 @@ run_site() {
         echo "[$(date '+%F %T')] 启动 ${site} 历史采集"
         echo "时间范围：${WINDOW_TEXT}"
         echo "栏目：${SECTIONS}"
-        echo "代理出口：${HUAXIN_PROXY_ENDPOINT}（禁止服务器直连）"
-        echo "并发：站点总并发4，单域名并发2，随机基础延迟2秒"
+        if [[ "${OUTBOUND_MODE}" == "direct" ]]; then
+            echo "出口模式：服务器固定公网 IP（低频受控直连）"
+        elif [[ "${OUTBOUND_MODE}" == "static" ]]; then
+            echo "代理模式：static，出口：${HUAXIN_PROXY_ENDPOINT}（禁止服务器直连）"
+        else
+            echo "代理模式：tianqi 动态代理（禁止服务器直连）"
+        fi
+        echo "并发：总并发${RUN_CONCURRENT_REQUESTS}，单域名${RUN_CONCURRENT_PER_DOMAIN}，随机基础延迟${RUN_DOWNLOAD_DELAY}秒"
         echo "输出：${OUTPUT_ROOT}/${site}"
+        echo "跨任务去重索引：${DEDUP_ROOT}/${site}/state/notice_versions.json"
         echo "保存策略：复用去重索引，跳过未变化旧公告，只追加新增或变化版本"
         echo "日志：${log_file}"
 
@@ -161,29 +257,30 @@ run_site() {
             -a "page_size=${PAGE_SIZE}" \
             -a "max_pages=${MAX_PAGES}" \
             "${WINDOW_ARGS[@]}" \
-            -s CRAWLER_OUTBOUND_MODE=static \
+            -s CRAWLER_OUTBOUND_MODE="${OUTBOUND_MODE}" \
             -s STATIC_PROXY_REQUIRED=True \
             -s STATIC_PROXY_AUTH_REQUIRED=True \
             -s STATIC_PROXY_RETRY_TIMES=2 \
             -s NOTICE_DEDUP_ENABLED=True \
+            -s NOTICE_DEDUP_ROOT="${DEDUP_ROOT}" \
             -s NOTICE_DEDUP_SKIP_KNOWN_IDENTITIES=False \
             -s NOTICE_AI_ENABLED=False \
             -s NOTICE_OUTPUT_ROOT="${OUTPUT_ROOT}" \
             -s FILES_STORE="${OUTPUT_ROOT}" \
             -s JOBDIR="${job_dir}" \
             -s HTTPCACHE_ENABLED=False \
-            -s DIRECT_CONCURRENT_REQUESTS=4 \
-            -s DIRECT_CONCURRENT_REQUESTS_PER_DOMAIN=2 \
-            -s DIRECT_DOWNLOAD_DELAY=2.0 \
-            -s DIRECT_AUTOTHROTTLE_START_DELAY=3.0 \
-            -s DIRECT_AUTOTHROTTLE_TARGET_CONCURRENCY=1.0 \
-            -s DIRECT_AUTOTHROTTLE_MAX_DELAY=60.0 \
-            -s DIRECT_RETRY_TIMES=2 \
-            -s DIRECT_MAX_RESPONSES_PER_RUN=1000000 \
-            -s DIRECT_GUARD_CONSECUTIVE_LIMIT=2 \
-            -s DIRECT_GUARD_TOTAL_LIMIT=4 \
-            -s DIRECT_GUARD_BASE_BACKOFF=60.0 \
-            -s DIRECT_GUARD_MAX_BACKOFF=600.0 \
+            -s DIRECT_CONCURRENT_REQUESTS="${RUN_CONCURRENT_REQUESTS}" \
+            -s DIRECT_CONCURRENT_REQUESTS_PER_DOMAIN="${RUN_CONCURRENT_PER_DOMAIN}" \
+            -s DIRECT_DOWNLOAD_DELAY="${RUN_DOWNLOAD_DELAY}" \
+            -s DIRECT_AUTOTHROTTLE_START_DELAY="${RUN_AUTOTHROTTLE_START_DELAY}" \
+            -s DIRECT_AUTOTHROTTLE_TARGET_CONCURRENCY="${RUN_AUTOTHROTTLE_TARGET_CONCURRENCY}" \
+            -s DIRECT_AUTOTHROTTLE_MAX_DELAY="${RUN_AUTOTHROTTLE_MAX_DELAY}" \
+            -s DIRECT_RETRY_TIMES="${RUN_RETRY_TIMES}" \
+            -s DIRECT_MAX_RESPONSES_PER_RUN="${RUN_MAX_RESPONSES}" \
+            -s DIRECT_GUARD_CONSECUTIVE_LIMIT="${RUN_GUARD_CONSECUTIVE_LIMIT}" \
+            -s DIRECT_GUARD_TOTAL_LIMIT="${RUN_GUARD_TOTAL_LIMIT}" \
+            -s DIRECT_GUARD_BASE_BACKOFF="${RUN_GUARD_BASE_BACKOFF}" \
+            -s DIRECT_GUARD_MAX_BACKOFF="${RUN_GUARD_MAX_BACKOFF}" \
             -s LOG_LEVEL=INFO
     } 2>&1 | tee -a "${log_file}"
     pipeline_status=("${PIPESTATUS[@]}")
@@ -194,8 +291,9 @@ run_site() {
     if [[ ${runner_status} -ne 0 || ${tee_status} -ne 0 ]]; then
         return 1
     fi
-    # Scrapy 主动保护性关停时进程可能仍返回0；只有 finished 才算完整采集。
-    if ! grep -Fq "固定代理关闭状态：reason=finished " "${log_file}"; then
+    # Scrapy 主动保护性关停时进程可能仍返回0；以通用 finish_reason 判断，
+    # 同时适用于 direct、static 和 tianqi。
+    if ! grep -Fq "'finish_reason': 'finished'" "${log_file}"; then
         echo "[$(date '+%F %T')] ${site} 未以 finished 正常结束，请检查日志中的关闭原因" \
             | tee -a "${log_file}" >&2
         return 1

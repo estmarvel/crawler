@@ -237,7 +237,9 @@ class NoticeDedupPipeline:
         site_dir = _ensure_site_context(spider, self.output_root)
         self.store = get_notice_dedup_store(
             self.crawler,
-            output_root=self.output_root,
+            output_root=Path(
+                self.crawler.settings.get("NOTICE_DEDUP_ROOT", self.output_root)
+            ),
             platform_code=spider.platform_code,
         )
         imported = self.store.bootstrap_from_json_exports(site_dir / "json")

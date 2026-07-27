@@ -73,10 +73,9 @@ cd /home/intsig/Crawler_Scrapy
 则在最后一页自然停止，不会空翻后续页面。列表日期缺失时仍请求详情，并在详情合并后再
 校验日期，避免因源站偶发缺字段而漏采。
 
-两个网站各运行一个 Scrapy 进程，因此会并行；每个网站的四个栏目也会并行调度。
-单站总并发为 4、单域名并发为 2，基础下载延迟 2 秒且随机化，AutoThrottle 目标并发为
-1。收到 403/429 会指数退避，连续 2 次或累计 4 次后主动终止该站任务。固定代理失效、
-认证失败或重试耗尽时会停止，绝不回退服务器真实 IP。
+两个网站各运行一个 Scrapy 进程，因此可并行；每个网站的栏目也会并行调度。默认服务器
+直连采用总并发 1、单域名并发 1、5 秒随机基础延迟和 AutoThrottle 目标并发 0.25。
+收到首次连续 403/429 即主动终止该站任务，不会继续冲击服务器出口 IP。
 
 脚本启用跨运行去重和追加输出，同一公告相同内容不会重复保存；同一公告正文发生变化时
 会追加新版本，保留旧版本和各自的“爬虫时间”。同一时间窗口中断后再次执行相同命令，
@@ -88,8 +87,8 @@ cd /home/intsig/Crawler_Scrapy
 - 玖邦 JSON/CSV/附件：`output/jiubang/`
 - 每次运行日志：`output/logs/<运行时间>/huaxin.log` 和 `jiubang.log`
 
-当前临时固定代理地址和认证信息按用户要求写在脚本中，也允许用同名环境变量覆盖；代理
-更换后应及时更新或移出源码。
+固定代理地址允许由环境变量覆盖；认证信息只从 `HUAXIN_PROXY_USERNAME`、
+`HUAXIN_PROXY_PASSWORD` 读取，不写入源码或命令行。代理更换后应更新部署环境。
 
 当前公开列表、详情和文件元数据 API 不发送登录 Token。详情页 JS 只根据顶层
 `fileId` 展示附件，`bidAnnouncementSectionDOS` 不是页面附件来源。`pdfFile` 是
@@ -187,22 +186,21 @@ CSV 以追加模式写入；JSON 保持标准数组格式，每次只在数组�
 第一次启用去重时会从已有 JSON 结果建立索引。为避免跨进程同时追加造成文件冲突，
 同一网站同一时间只运行一个 Scrapy 进程。
 
-## 固定代理与天启备用模式
+## 服务器直连保护与代理备用模式
 
-默认模式为 `static`，会强制使用 `STATIC_PROXY_ENDPOINT` 和上述环境变量中的凭据。
-凭据缺失、认证失败或代理网络重试耗尽时会停止 Spider，不会回退服务器真实 IP。
+默认模式为 `direct`，使用当前服务器公网出口。它明确关闭 `HttpProxyMiddleware`，避免
+继承宿主机代理环境，并启用单并发、5 秒随机延迟、AutoThrottle、零普通重试和
+`DirectAccessGuardMiddleware`。第一次连续出现 403/429 就主动关闭 Spider；API 还会
+限制每页、页数和每栏目公告数。`static`、`tianqi` 保留为可选备用出口。
 
-华新和玖邦都明确禁止 `CRAWLER_OUTBOUND_MODE=direct`；即使手动传入也会在初始化
-阶段报错，不会发送任何目标请求。框架默认值保持更保守的单域名并发 1、基础延迟 3 秒；
-历史脚本将单站单域名并发设为 2、基础延迟设为 2 秒，并由随机延迟和 AutoThrottle
-动态降速。收到 403/429 时按 60～600 秒提高下载槽延迟；同一域名连续 2 次或累计
-4 次限制响应时主动关闭 Spider。
-
-需要临时恢复天启代理时：
+需要切换到天启代理时，统一脚本和单 Spider 都复用相同的代理池实现：
 
 ```bash
 export TIANQI_SECRET='...'
 export TIANQI_SIGN='...'
+./run_tws_history.sh --outbound-mode tianqi --days 1 --sites huaxin
+
+# 或直接运行单 Spider：
 scrapy crawl huaxin -a max_records=5 -a page_size=5 \
   -s CRAWLER_OUTBOUND_MODE=tianqi \
   -s TIANQI_PROXY_API_CALL_LIMIT=1

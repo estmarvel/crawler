@@ -37,14 +37,22 @@ def _settings(mode: str | None = None) -> Settings:
 
 
 class OutboundModeTest(unittest.TestCase):
-    def test_static_proxy_is_the_default_mode(self):
+    def test_direct_is_the_default_mode(self):
         settings = _settings()
         middlewares = settings.getdict("DOWNLOADER_MIDDLEWARES")
-        self.assertEqual(settings.get("CRAWLER_OUTBOUND_MODE"), "static")
+        self.assertEqual(settings.get("CRAWLER_OUTBOUND_MODE"), "direct")
         self.assertFalse(settings.getbool("TIANQI_PROXY_ENABLED"))
+        self.assertFalse(settings.getbool("STATIC_PROXY_ENABLED"))
+        self.assertFalse(settings.getbool("HTTPPROXY_ENABLED"))
+        self.assertIsNone(middlewares[TIANQI_MIDDLEWARE])
+        self.assertIsNone(middlewares[STATIC_PROXY_MIDDLEWARE])
+        self.assertEqual(middlewares[DIRECT_GUARD_MIDDLEWARE], 650)
+
+    def test_static_proxy_can_still_be_selected(self):
+        settings = _settings("static")
+        middlewares = settings.getdict("DOWNLOADER_MIDDLEWARES")
         self.assertTrue(settings.getbool("STATIC_PROXY_ENABLED"))
         self.assertTrue(settings.getbool("HTTPPROXY_ENABLED"))
-        self.assertIsNone(middlewares[TIANQI_MIDDLEWARE])
         self.assertEqual(middlewares[STATIC_PROXY_MIDDLEWARE], 610)
         self.assertEqual(middlewares[DIRECT_GUARD_MIDDLEWARE], 650)
 
@@ -54,10 +62,6 @@ class OutboundModeTest(unittest.TestCase):
         self.assertTrue(settings.getbool("TIANQI_PROXY_ENABLED"))
         self.assertEqual(middlewares[TIANQI_MIDDLEWARE], 610)
         self.assertNotIn(DIRECT_GUARD_MIDDLEWARE, middlewares)
-
-    def test_server_direct_mode_is_always_rejected(self):
-        with self.assertRaisesRegex(ValueError, "禁止 direct"):
-            _settings("direct")
 
     def test_unknown_mode_is_rejected(self):
         with self.assertRaises(ValueError):
@@ -109,6 +113,16 @@ class OutboundModeTest(unittest.TestCase):
         with patch.dict(os.environ, {}, clear=True):
             with self.assertRaises(ProxyPoolConfigurationError):
                 StaticProxyMiddleware.from_crawler(crawler)
+
+    def test_connect_407_is_recognized_as_proxy_auth_failure(self):
+        error = RuntimeError(
+            "Could not open CONNECT tunnel with proxy "
+            "[{'status': 407, 'reason': b'Proxy Authentication Required'}]"
+        )
+        self.assertTrue(StaticProxyMiddleware._is_auth_failure(error))
+        self.assertFalse(
+            StaticProxyMiddleware._is_auth_failure(RuntimeError("connection timed out"))
+        )
 
 
 class SpiderCloseCompatibilityTest(unittest.TestCase):

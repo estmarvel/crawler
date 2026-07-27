@@ -31,7 +31,7 @@ class _Stats:
 
 
 class _Crawler:
-    def __init__(self, spider, output_root: Path):
+    def __init__(self, spider, output_root: Path, dedup_root: Path | None = None):
         self.spider = spider
         self.settings = Settings(
             {
@@ -42,6 +42,8 @@ class _Crawler:
                 "NOTICE_EXPORT_EMPTY_FILES": False,
             }
         )
+        if dedup_root is not None:
+            self.settings.set("NOTICE_DEDUP_ROOT", str(dedup_root))
         self.stats = _Stats()
 
 
@@ -201,6 +203,23 @@ class AppendExportTest(unittest.TestCase):
 
             self.assertNotIn("HTML快照路径", result["missing_fields"])
             self.assertNotIn("HTML快照SHA256", result["missing_fields"])
+
+    def test_dedup_state_can_be_shared_outside_task_output(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            task_output = root / "tasks" / "42"
+            shared_state = root / "shared"
+            spider = _ExportSpider()
+            crawler = _Crawler(spider, task_output, shared_state)
+            dedup = NoticeDedupPipeline.from_crawler(crawler)
+
+            dedup.open_spider()
+
+            self.assertEqual(
+                dedup.store.path,
+                shared_state / "dedup_export" / "state" / "notice_versions.json",
+            )
+            self.assertFalse((task_output / "dedup_export" / "state").exists())
 
 
 if __name__ == "__main__":

@@ -113,6 +113,13 @@ class StaticProxyMiddleware:
                 reason,
             )
 
+    @staticmethod
+    def _is_auth_failure(exception: Exception) -> bool:
+        """识别 HTTPS CONNECT 阶段被 Twisted 包装成异常的代理 407。"""
+
+        message = str(exception).lower()
+        return "407" in message and "proxy authentication required" in message
+
     def process_request(self, request: Request):
         request.meta["proxy"] = self.endpoint
         request.meta["_static_proxy"] = True
@@ -129,6 +136,13 @@ class StaticProxyMiddleware:
 
     async def process_exception(self, request: Request, exception: Exception):
         if isinstance(exception, IgnoreRequest):
+            return None
+        if self._is_auth_failure(exception):
+            self.crawler.stats.inc_value("static_proxy/auth_failed")
+            # CONNECT 407 不会形成 Scrapy Response，必须在异常分支单独分类。
+            # 设置为0可阻止后续 RetryMiddleware 对无效凭据反复尝试。
+            request.meta["max_retry_times"] = 0
+            self._close_spider("static_proxy_auth_failed")
             return None
         self.crawler.stats.inc_value("static_proxy/network_exception")
         retry = None

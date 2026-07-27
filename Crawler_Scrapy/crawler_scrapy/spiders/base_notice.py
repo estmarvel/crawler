@@ -84,7 +84,10 @@ class BaseNoticeSpider(scrapy.Spider):
         )
         store = get_notice_dedup_store(
             crawler,
-            output_root=crawler.settings.get("NOTICE_OUTPUT_ROOT", "output"),
+            output_root=crawler.settings.get(
+                "NOTICE_DEDUP_ROOT",
+                crawler.settings.get("NOTICE_OUTPUT_ROOT", "output"),
+            ),
             platform_code=self.platform_code or self.name,
         )
         if crawler.settings.getbool(
