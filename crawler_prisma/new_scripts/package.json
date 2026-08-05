@@ -1,0 +1,19 @@
+{
+  "name": "crawler-prisma-split-storage-importers",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Import crawler JSON into MySQL, MongoDB and MinIO split storage",
+  "scripts": {
+    "import:raw-notices": "node import_raw_notices.js",
+    "import:raw-notice-attachments": "node import_raw_notice_attachments.js",
+    "import:notice-extractions": "node import_notice_extractions.js",
+    "import:all": "node import_all.js",
+    "import:projects": "node import_projects.js",
+    "import:project-notices": "node import_project_notices.js",
+    "import:project-notice-attachments": "node import_project_notice_attachments.js",
+    "repair:missing-mongo": "node repair_missing_mongo_documents.js",
+    "repair:link-huaxin-candidates": "node link_recovered_huaxin_candidates.js",
+    "repair:link-huaxin": "node link_recovered_huaxin_candidates.js",
+    "test": "node --test test/*.test.js"
+  }
+}

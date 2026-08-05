@@ -3,12 +3,12 @@
 字段来源：项目爬取关键字段20260622.xlsx。
 
 设计原则：
-1. 业务字段统一放在 NoticeItem.data 中；
+1. Excel 要求的业务字段及少量有业务含义的扩展字段统一放在 NoticeItem.data 中；
 2. 各网站可以使用不同提取逻辑，但最终必须转换成这里的字段名；
 3. 字段列表保持固定顺序，便于 CSV、JSON 导出和后续数据库映射；
-4. 每种公告最后统一增加系统字段：爬虫时间、详情页链接、HTML快照路径、
-   HTML快照SHA256、附件；
-5. HTML 原文不直接写入 CSV/JSON，只保存独立快照文件，并在结果中记录路径和哈希；
+4. 爬虫/数据库元数据只保存在 NoticeItem 顶层，导出时统一追加一次，不再
+   重复塞入每一种业务 Schema；
+5. HTML 原文保存在独立快照和 JSON 溯源包中，并记录路径与 SHA256；
 6. 对旧 settings.py / crawler.py 中的字段名提供兼容映射。
 """
 
@@ -21,9 +21,10 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Final, Mapping
 
 
-NOTICE_SCHEMA_VERSION: Final[str] = "2026-07-16-v6"
+NOTICE_SCHEMA_VERSION: Final[str] = "2026-08-05-v8"
 
-# 数据库中已经存在、并且可由爬虫或规则解析器直接产出的公共字段。
+# 数据库中已经存在、并且可由爬虫或规则解析器直接产出的存储元数据字段。
+# 它们不是公告业务字段，不能参与业务字段缺失率或被存入 extractedFields。
 DATABASE_CRAWLER_FIELDS: Final[tuple[str, ...]] = (
     "公告正文",
     "解析状态",
@@ -33,8 +34,9 @@ DATABASE_CRAWLER_FIELDS: Final[tuple[str, ...]] = (
     "是否已核验",
 )
 
-# 所有公告类型末尾统一包含这些数据库公共字段和系统字段。
-# “附件”固定为最后一个字段，便于 CSV 查看和后续数据库映射。
+# JSON/CSV 传输层使用的公共存储字段。“附件”固定为最后一个字段。
+# 保留 SYSTEM_FIELDS 名称是为了兼容现有导出器和 AI 排除列表；
+# ANNOUNCEMENT_SCHEMAS 自 v7 起不再包含这些字段。
 SYSTEM_FIELDS: Final[tuple[str, ...]] = (
     *DATABASE_CRAWLER_FIELDS,
     "爬虫时间",
@@ -45,10 +47,10 @@ SYSTEM_FIELDS: Final[tuple[str, ...]] = (
 )
 
 
-def _with_system_fields(*fields: str) -> tuple[str, ...]:
-    """给公告业务字段追加统一系统字段，并保证没有重复字段名。"""
+def _business_fields(*fields: str) -> tuple[str, ...]:
+    """返回纯业务字段，并保证没有重复字段名。"""
 
-    result = tuple(fields) + SYSTEM_FIELDS
+    result = tuple(fields)
     if len(result) != len(set(result)):
         raise ValueError(f"公告字段存在重复项：{result}")
     return result
@@ -59,10 +61,12 @@ def _with_system_fields(*fields: str) -> tuple[str, ...]:
 # 旧代码中的“招标代理机构(名称)”通过 FIELD_ALIASES 兼容映射，不再独立输出。
 ANNOUNCEMENT_SCHEMAS: Final["OrderedDict[str, tuple[str, ...]]"] = OrderedDict(
     {
-        "招标计划": _with_system_fields(
+        "招标计划": _business_fields(
             "项目性质",
             "招标方式",
             "项目名称",
+            "项目编号",
+            "招标编号",
             "项目类型",
             "项目总投资",
             "招标内容",
@@ -74,10 +78,11 @@ ANNOUNCEMENT_SCHEMAS: Final["OrderedDict[str, tuple[str, ...]]"] = OrderedDict(
             "发布日期",
             "发布网站",
         ),
-        "资格预审公告": _with_system_fields(
+        "资格预审公告": _business_fields(
             "项目性质",
-            "源站公告性质",
             "项目名称",
+            "项目编号",
+            "招标编号",
             "所属行业",
             "组织形式",
             "开标时间",
@@ -109,10 +114,11 @@ ANNOUNCEMENT_SCHEMAS: Final["OrderedDict[str, tuple[str, ...]]"] = OrderedDict(
             "发布日期",
             "发布网站",
         ),
-        "招标公告": _with_system_fields(
+        "招标公告": _business_fields(
             "项目性质",
-            "源站公告性质",
             "项目名称",
+            "项目编号",
+            "招标编号",
             "所属行业",
             "组织形式",
             "开标时间",
@@ -147,10 +153,11 @@ ANNOUNCEMENT_SCHEMAS: Final["OrderedDict[str, tuple[str, ...]]"] = OrderedDict(
             "发布日期",
             "发布网站",
         ),
-        "中标候选人公示": _with_system_fields(
+        "中标候选人公示": _business_fields(
             "项目性质",
-            "源站公告性质",
             "项目名称",
+            "项目编号",
+            "招标编号",
             "所属行业",
             "组织形式",
             "开标时间",
@@ -158,7 +165,6 @@ ANNOUNCEMENT_SCHEMAS: Final["OrderedDict[str, tuple[str, ...]]"] = OrderedDict(
             "招标编号/项目编号",
             "中标候选人名称",
             "中标候选人报价",
-            "中标候选人明细",
             "招标人/采购人",
             "招标人地址",
             "招标人联系人",
@@ -170,9 +176,11 @@ ANNOUNCEMENT_SCHEMAS: Final["OrderedDict[str, tuple[str, ...]]"] = OrderedDict(
             "发布日期",
             "发布网站",
         ),
-        "定标候选人公示": _with_system_fields(
+        "定标候选人公示": _business_fields(
             "项目性质",
             "项目名称",
+            "项目编号",
+            "招标编号",
             "所属行业",
             "组织形式",
             "开标时间",
@@ -199,17 +207,17 @@ ANNOUNCEMENT_SCHEMAS: Final["OrderedDict[str, tuple[str, ...]]"] = OrderedDict(
             "发布日期",
             "发布网站",
         ),
-        "中标结果公示": _with_system_fields(
+        "中标结果公示": _business_fields(
             "项目性质",
-            "源站公告性质",
             "项目名称",
+            "项目编号",
+            "招标编号",
             "所属行业",
             "组织形式",
             "招标方式",
             "中标人名称",
             "联合体成员",
             "中标价",
-            "中标结果明细",
             "工期",
             "项目经理",
             "项目经理证书名称",
@@ -227,9 +235,11 @@ ANNOUNCEMENT_SCHEMAS: Final["OrderedDict[str, tuple[str, ...]]"] = OrderedDict(
             "发布日期",
             "发布网站",
         ),
-        "更正结果公示": _with_system_fields(
+        "更正结果公示": _business_fields(
             "公共类型",
             "项目名称",
+            "项目编号",
+            "招标编号",
             "所属行业",
             "组织形式",
             "开标时间",
@@ -250,9 +260,10 @@ ANNOUNCEMENT_SCHEMAS: Final["OrderedDict[str, tuple[str, ...]]"] = OrderedDict(
             "发布日期",
             "发布网站",
         ),
-        "合同与履约": _with_system_fields(
+        "合同与履约": _business_fields(
             "项目名称",
             "项目编号",
+            "招标编号",
             "合同名称",
             "招标人名称",
             "中标人名称",
@@ -317,12 +328,18 @@ AMOUNT_LIST_FIELDS: Final[frozenset[str]] = frozenset(
     }
 )
 OBJECT_LIST_FIELDS: Final[frozenset[str]] = frozenset(
-    {
-        "中标候选人明细",
-        "中标结果明细",
-    }
+    {"中标候选人明细", "中标结果明细"}
 )
 BOOLEAN_FIELDS: Final[frozenset[str]] = frozenset({"是否已核验"})
+
+# 仅供站点解析、路由判断和质量诊断使用，不属于数据库业务字段，也不会由
+# NoticeSchemaPipeline 写入最终 data/CSV/JSON 主字段。原始值仍在 raw_data/_trace。
+PARSER_DIAGNOSTIC_FIELDS: Final[dict[str, tuple[str, ...]]] = {
+    "资格预审公告": ("源站公告性质",),
+    "招标公告": ("源站公告性质",),
+    "中标候选人公示": ("源站公告性质", "中标候选人明细"),
+    "中标结果公示": ("源站公告性质", "中标结果明细"),
+}
 
 
 NOTICE_TYPE_ALIASES: Final[dict[str, str]] = {
@@ -378,21 +395,25 @@ FIELD_ALIASES: Final[dict[str, Mapping[str, str]]] = {
 }
 
 
-# 这些数据库字段均允许为空或有数据库默认值，不计入必填缺失字段。
+# 存储元数据已经移出业务 Schema；保留空集合兼容缺失字段计算接口。
 COMMON_OPTIONAL_FIELDS: Final[frozenset[str]] = frozenset(
     {
-        "公告正文",
-        "内容指纹",
-        "抽取方式",
-        "抽取版本",
-        "是否已核验",
-        "附件",
+        # 招标编号是八类新增关联字段，源公告可能不公开；旧的组合字段继续
+        # 保留，兼容项目关键字段表和既有数据库导入逻辑。
+        "招标编号",
     }
 )
 
 OPTIONAL_FIELDS: Final[dict[str, frozenset[str]]] = {
+    # 除合同外，“项目编号”是本次为关联补充的扩展字段；合同 Schema 中的
+    # 项目编号原本就是 Excel 必需字段，不能在这里降级为可选。
+    "招标计划": frozenset({"项目编号"}),
+    "资格预审公告": frozenset({"项目编号"}),
+    "招标公告": frozenset({"项目编号"}),
+    "中标候选人公示": frozenset({"项目编号"}),
     "定标候选人公示": frozenset(
         {
+            "项目编号",
             "定标候选人项目经理",
             "定标候选人项目经理相关证书及编号",
             "定标候选人项目副经理",
@@ -405,6 +426,7 @@ OPTIONAL_FIELDS: Final[dict[str, frozenset[str]]] = {
     ),
     "中标结果公示": frozenset(
         {
+            "项目编号",
             "联合体成员",
             "项目经理",
             "项目经理证书名称",
@@ -413,6 +435,7 @@ OPTIONAL_FIELDS: Final[dict[str, frozenset[str]]] = {
             "依据文号",
         }
     ),
+    "更正结果公示": frozenset({"项目编号"}),
 }
 
 
@@ -692,12 +715,20 @@ def _empty_value_for_field(field: str) -> Any:
     return ""
 
 
-def create_empty_notice_data(notice_type: Any) -> dict[str, Any]:
+def create_empty_notice_data(
+    notice_type: Any,
+    *,
+    include_parser_diagnostics: bool = False,
+) -> dict[str, Any]:
     """创建包含该公告类型全部字段的空字典。"""
 
+    normalized_type = normalize_notice_type(notice_type)
+    fields = list(get_notice_fields(normalized_type))
+    if include_parser_diagnostics:
+        fields.extend(PARSER_DIAGNOSTIC_FIELDS.get(normalized_type, ()))
     return {
         field: _empty_value_for_field(field)
-        for field in get_notice_fields(notice_type)
+        for field in fields
     }
 
 
@@ -708,6 +739,8 @@ def _is_empty(value: Any) -> bool:
 def canonicalize_notice_data(
     notice_type: Any,
     source_data: Mapping[str, Any] | None,
+    *,
+    include_parser_diagnostics: bool = False,
 ) -> dict[str, Any]:
     """将网站提取结果转换为固定字段结构。
 
@@ -720,9 +753,11 @@ def canonicalize_notice_data(
     """
 
     normalized_type = normalize_notice_type(notice_type)
-    fields = get_notice_fields(normalized_type)
+    fields = list(get_notice_fields(normalized_type))
     if not fields:
         return {}
+    if include_parser_diagnostics:
+        fields.extend(PARSER_DIAGNOSTIC_FIELDS.get(normalized_type, ()))
 
     source = dict(source_data or {})
     aliases = {

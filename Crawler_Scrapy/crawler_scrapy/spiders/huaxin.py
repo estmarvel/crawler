@@ -34,7 +34,7 @@ class HuaxinSpider(BaseNoticeSpider):
     platform_name = config.PLATFORM_NAME
     platform_code = config.PLATFORM_CODE
     allowed_domains = ["www.ygcgpt.com"]
-    parser_version = "huaxin-v9"
+    parser_version = "huaxin-v11-trace-and-fulltext"
     extraction_model_name = "huaxin-rule-parser"
 
     # 结构化 API 已直接返回的字段不再交给 AI；只有规则解析后仍为空、且可能
@@ -422,6 +422,31 @@ class HuaxinSpider(BaseNoticeSpider):
             self.logger.error("[%s] 列表 records 类型异常：%s", section, type(records).__name__)
             return
 
+        total = self._safe_int(data.get("total")) if isinstance(data, Mapping) else 0
+        pages = self._safe_int(data.get("pages")) if isinstance(data, Mapping) else 0
+        request_payload = (
+            self.site_config.build_bid_plan_list_payload(page, self.page_size)
+            if section == "zbjh"
+            else self.site_config.build_list_payload(section, page, self.page_size)
+        )
+        list_trace = {
+            "responseMetadata": self.build_response_metadata(
+                response,
+                request_kind="list_api",
+                context={"section": section, "page": page},
+            ),
+            "requestPayload": request_payload,
+            # records 已逐条保存在 raw_data.list，不在每条公告中重复整页数据。
+            "businessEnvelope": {
+                "code": payload.get("code"),
+                "message": payload.get("msg"),
+                "page": page,
+                "pageSize": self.page_size,
+                "total": total,
+                "pages": pages,
+            },
+        }
+
         boundary_reached = self._page_reaches_start_boundary(section, records)
 
         for record in records:
@@ -477,10 +502,9 @@ class HuaxinSpider(BaseNoticeSpider):
             self._scheduled_counts[section] += 1
             record_with_meta = dict(record)
             record_with_meta["_crawler_list_fingerprint"] = list_fingerprint
+            record_with_meta["_crawler_list_trace"] = list_trace
             yield self._detail_request(section, notice_id, record_with_meta)
 
-        total = self._safe_int(data.get("total")) if isinstance(data, Mapping) else 0
-        pages = self._safe_int(data.get("pages")) if isinstance(data, Mapping) else 0
         should_continue = (
             self._scheduled_counts[section] < self.max_records
             and page < self.max_pages
@@ -570,12 +594,22 @@ class HuaxinSpider(BaseNoticeSpider):
         detail = self._extract_detail(response, section, notice_id)
         if not detail:
             return
+        source_detail = dict(detail)
+        detail_envelope = self._business_envelope(response)
         detail["_route_planid"] = notice_id
         detail.setdefault("annId", notice_id)
         self._merge_missing(detail, list_record)
         if not self._detail_is_in_window(section, detail, notice_id):
             return
-        item = self._build_item(section, detail, source)
+        item = self._build_item(
+            section,
+            detail,
+            source,
+            response=response,
+            list_record=list_record,
+            source_detail=source_detail,
+            detail_envelope=detail_envelope,
+        )
         if item is not None:
             yield self._start_attachment_resolution(item)
 
@@ -593,11 +627,21 @@ class HuaxinSpider(BaseNoticeSpider):
             return
         if not detail:
             return
+        source_detail = dict(detail)
+        detail_envelope = self._business_envelope(response)
         self._merge_missing(detail, list_record)
         detail.setdefault("annId", notice_id)
         if not self._detail_is_in_window(section, detail, notice_id):
             return
-        item = self._build_item(section, detail, source)
+        item = self._build_item(
+            section,
+            detail,
+            source,
+            response=response,
+            list_record=list_record,
+            source_detail=source_detail,
+            detail_envelope=detail_envelope,
+        )
         if item is not None:
             yield self._start_attachment_resolution(item)
 
@@ -613,9 +657,6 @@ class HuaxinSpider(BaseNoticeSpider):
     def _next_attachment_request(self, item, attachments, index: int):
         if index >= len(attachments):
             item["attachments"] = attachments
-            data = dict(item.get("data") or {})
-            data["附件"] = attachments
-            item["data"] = data
             item["file_urls"] = [
                 str(value.get("file_url"))
                 for value in attachments
@@ -712,6 +753,19 @@ class HuaxinSpider(BaseNoticeSpider):
             return None
         return detail
 
+    def _business_envelope(self, response: Response) -> dict[str, Any]:
+        """保留详情接口业务包络，但避免与 raw_data.detail 重复保存 data。"""
+
+        try:
+            payload = self._json_object(response)
+        except (ValueError, TypeError):
+            return {}
+        return {
+            str(key): value
+            for key, value in payload.items()
+            if key != "data"
+        }
+
     def _backup_detail_request(
         self,
         section: str,
@@ -743,6 +797,11 @@ class HuaxinSpider(BaseNoticeSpider):
         section: str,
         detail: dict[str, Any],
         source: str,
+        *,
+        response: Response | None = None,
+        list_record: Mapping[str, Any] | None = None,
+        source_detail: Mapping[str, Any] | None = None,
+        detail_envelope: Mapping[str, Any] | None = None,
     ):
         subtype, notice_type, data, attachments = self.parser_class.parse(
             section, detail
@@ -757,6 +816,19 @@ class HuaxinSpider(BaseNoticeSpider):
             )
             return None
         detail_url = self.parser_class.detail_url(subtype, detail)
+        list_record_value = dict(list_record or {})
+        list_trace = list_record_value.get("_crawler_list_trace")
+        detail_response_metadata = self.build_response_metadata(
+            response,
+            request_kind="detail_api",
+            context={"section": section, "detailSource": source},
+        ) if response is not None else {}
+        if isinstance(list_trace, Mapping):
+            related = list_trace.get("responseMetadata")
+            if isinstance(related, Mapping):
+                detail_response_metadata["relatedRequests"] = [dict(related)]
+        if detail_envelope:
+            detail_response_metadata["businessEnvelope"] = dict(detail_envelope)
         return self.build_notice_item(
             notice_type=notice_type,
             notice_subtype=subtype,
@@ -765,7 +837,19 @@ class HuaxinSpider(BaseNoticeSpider):
             publish_time=str(detail.get("releaseTime") or detail.get("createTime") or ""),
             detail_url=detail_url,
             data=data,
-            raw_data={"detail_source": source, "detail": detail},
+            raw_data={
+                "detailSource": source,
+                "list": {
+                    key: value
+                    for key, value in list_record_value.items()
+                    if not str(key).startswith("_crawler_")
+                },
+                "detail": dict(source_detail or detail),
+                "transport": {
+                    "list": dict(list_trace) if isinstance(list_trace, Mapping) else None,
+                    "detailEnvelope": dict(detail_envelope or {}),
+                },
+            },
             raw_html=self.parser_class.raw_html(detail),
             raw_text=self.parser_class.raw_text(detail),
             parse_status="PARSED",
@@ -773,6 +857,7 @@ class HuaxinSpider(BaseNoticeSpider):
             extraction_version=self.parser_version,
             is_verified=False,
             field_meta={"site_parser": self.parser_version, "detail_source": source},
+            response_metadata=detail_response_metadata,
             source_list_fingerprint=str(
                 detail.get("_crawler_list_fingerprint") or ""
             ),

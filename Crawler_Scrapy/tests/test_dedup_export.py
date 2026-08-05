@@ -128,9 +128,21 @@ class AppendExportTest(unittest.TestCase):
             title="测试项目招标公告",
             detail_url="https://example.invalid/notices/1001",
             data={"项目名称": "测试项目", "发布网站": "去重测试平台"},
+            raw_data={
+                "source": {
+                    "id": "notice-1001",
+                    "largeNumericId": 2_082_356_733_120_929_792,
+                    "body": text,
+                }
+            },
             raw_html=f"<p>{text}</p>",
             raw_text=text,
             extraction_model="rule-test",
+            extraction_version="rule-v1",
+            response_metadata={
+                "requestKind": "detail_api",
+                "response": {"url": "https://example.invalid/api/1001", "status": 200},
+            },
         )
 
     @staticmethod
@@ -178,9 +190,23 @@ class AppendExportTest(unittest.TestCase):
                 [row["公告正文"] for row in rows],
                 ["正文版本一", "正文版本二"],
             )
+            trace = rows[1]["_trace"]
+            self.assertEqual(trace["schemaVersion"], "1.0")
+            self.assertEqual(trace["payload"]["source"]["body"], "正文版本二")
+            self.assertEqual(
+                trace["payload"]["source"]["largeNumericId"],
+                "2082356733120929792",
+            )
+            self.assertEqual(trace["rawHtml"], "<p>正文版本二</p>")
+            self.assertEqual(trace["rawText"], "正文版本二")
+            self.assertEqual(trace["crawlerVersion"], "rule-v1")
+            self.assertEqual(trace["responseMetadata"]["response"]["status"], 200)
+            self.assertEqual(len(trace["integrity"]["payloadSha256"]), 64)
+            self.assertEqual(len(trace["integrity"]["rawHtmlSha256"]), 64)
             with csv_path.open("r", encoding="utf-8-sig", newline="") as handle:
                 csv_rows = list(csv.DictReader(handle))
             self.assertEqual(len(csv_rows), 2)
+            self.assertNotIn("_trace", csv_rows[0])
 
             state = json.loads(state_path.read_text(encoding="utf-8"))
             identity = "dedup_export|id:notice-1001"

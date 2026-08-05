@@ -48,14 +48,31 @@ Spider 名称为 `sxzwfw`。默认仍只采集工程建设六个栏目；另外�
 - 项目地点保存为“正文地点|列表交易场所”，相同值不重复；
 - 招标人和代理机构都从正文最后一个真正的“联系方式”章节提取，分别限定角色边界；
 - PDF 物理换行只在字段解析时按下一标签/下一编号合并，原始正文不被改写；
+- 项目编号兼容“项目编号、招标编号、招标项目编号、标段编号”；控制价和财政审定金额
+  优先取标签后的总额，括号内分标段金额不会覆盖总额；
+- 兼容“（1）获取时间、电子招标文件获取方式、建设资金为/项目资金来源由”等源站
+  写法，中文“年月日时分”会规范化后再写入时间字段；
 - 候选人—报价、中标人—中标价先构造成逐条明细，缺少某条报价时保留 `null`，不会
-  让后续价格向前错位；兼容“第1名：公司，投标报价：金额”的同行写法；
+  让后续价格向前错位；兼容“第1名：公司，投标报价：金额”、中标人和中标价同一行，
+  以及中标价格标签和值分行的写法；
 - 更正、终止、延期、答疑、控制价等细分类别写入“源站公告性质”。中标结果更正映射
-  到“更正结果公示”，其余没有独立 Schema 的公告保留大类和源站细分类别。
+  到“更正结果公示”；终止、废标、流标、招标失败和撤销使用 `zzgg` 子类型，业务字段
+  复用招标公告 Schema，但导出编码为数据库统一使用的 `TERMINATION`。其他公告标题
+  未写“废标”时，正文明确出现“有效投标人不足三家”也按终止类识别；
 
-默认保存详情 HTML 快照用于核验。正文中的直接文件链接会进入附件队列；如果页面调用
+工程建设公告子类型使用 `engineering.<源栏目>.<Schema子类型>`，例如：
+
+- `engineering.zbgg_zys.zbgg`：源站“招标/资审公告”，Schema 为招标公告；
+- `engineering.bg.zbgg`：源站“更正公告”，内容仍是招标公告的变更；
+- `engineering.qt.zzgg`：源站“其他公告”，实际为终止/废标类；
+- `engineering.gs.zbjg`：源站“中标结果公示”。
+
+这样既能按最后一段直接映射现有数据库公告类型，又不会丢失源站六种信息类型。
+
+默认保存详情 HTML 快照用于核验。正文中的直接文件链接会进入附件清单；如果页面调用
 `Cms.attachment(...)`，Spider 会先请求 `/attachment_url.jspx` 解析真实后缀，再按
-前端规则生成 `/attachment.jspx?cid=...&i=...` 下载地址。附件只下载归档，不做 OCR。
+前端规则生成 `/attachment.jspx?cid=...&i=...` 下载地址。正式入口把公告和文件下载
+分成两个阶段，避免大附件阻塞公告采集；附件只下载归档，不做 OCR。
 
 ## 运行方式
 
@@ -65,63 +82,71 @@ Spider 名称为 `sxzwfw`。默认仍只采集工程建设六个栏目；另外�
 cd /home/intsig/Crawler_Scrapy
 ```
 
-最近一天、小批量检查（每个栏目最多 5 条）：
+新框架正式入口默认采集最近 180 天，并在公告完成后独立下载附件：
 
 ```bash
-./run_sxzwfw_history.sh --days 1 --max-records 5
+./run_sxzwfw.sh
 ```
 
-六种工程建设信息类型的独立验收测试（每种 5 条，独立保存，不混入正式输出）：
+六种工程建设信息类型各取最多 5 条，只采公告、正文、快照和附件清单：
 
 ```bash
-./run_sxzwfw_test.sh
-```
-
-政府采购更正、结果公告各 5 条的独立验收测试：
-
-```bash
-./run_sxzwfw_test.sh --module government
-```
-
-测试默认在最近 365 天内，用一个日期查询窗口分别获取六种类型的最新 5 条，避免按月
-拆分产生无用列表请求。结果保存在
-`test_output/sxzwfw_5_each_<运行时间>/sxzwfw/`，日志会同时输出每种类型是否达到 5 条
-以及最终是否成功导出 30 条。需要扩大搜索范围时可使用
-`./run_sxzwfw_test.sh --days 730`。
-
-最近 6 个月（默认 180 天）：
-
-```bash
-./run_sxzwfw_history.sh --days 180
+./run_sxzwfw.sh --phase notices --days 365 --max-records 5
 ```
 
 指定精确区间：
 
 ```bash
-./run_sxzwfw_history.sh --start-date 2026-01-16 --end-date 2026-07-16
+./run_sxzwfw.sh \
+  --start-date 2026-01-01 --end-date 2026-08-04
+```
+
+只运行附件阶段：
+
+```bash
+./run_sxzwfw.sh --phase attachments
 ```
 
 只抓公告、候选人和结果：
 
 ```bash
-./run_sxzwfw_history.sh --days 30 --sections zbgg_zys,hxr,gs
+./run_sxzwfw.sh --phase notices --days 30 \
+  --sections zbgg_zys,hxr,gs
 ```
 
-脚本使用 `myenv`，固定代理默认为 `210.51.27.8:10000`。代理地址、账号和密码可以用
-`HUAXIN_PROXY_ENDPOINT/HUAXIN_PROXY_USERNAME/HUAXIN_PROXY_PASSWORD` 覆盖。
-固定代理不可用、认证失败或触发访问限制保护阈值时任务立即停止，不回退服务器公网 IP。
+审计分类、正文、字段值、快照 SHA256 和附件清单：
+
+```bash
+python -m crawler_scrapy.sites.sxzwfw.audit new_output \
+  --report new_output/sxzwfw/audit_report.json
+```
+
+入口默认使用已经实抓验证的服务器直连，并默认总并发/单域名并发为 2、每批 3~5 秒间隔、
+AutoThrottle、403/429 首次即停及不自动重试。它不会读取环境代理，也不会使用浏览器。
+如需指定 Python 环境：
+
+```bash
+export CRAWLER_PYTHON_COMMAND=/home/vipuser/miniconda3/envs/myenv/bin/python
+```
 
 输出采用框架现有的追加和版本去重逻辑：
 
-- JSON：`output/sxzwfw/json/`
-- CSV：`output/sxzwfw/csv/`
-- HTML 快照：`output/sxzwfw/snapshots/`
-- 附件：`output/sxzwfw/attachments/`
-- 去重和续跑状态：`output/sxzwfw/state/`
-- 日志：`output/logs/<运行时间>/sxzwfw.log`
+- JSON：`new_output/sxzwfw/json/`
+- CSV：`new_output/sxzwfw/csv/`
+- HTML 快照：`new_output/sxzwfw/snapshots/`
+- 附件：`new_output/sxzwfw/attachments/`
+- 去重、JOBDIR 和续跑状态：`new_output/sxzwfw/state/`
+- 日志：`new_output/sxzwfw/logs/`
 
-同一公告内容指纹不变时不会重复写入；正文发生变化时追加新版本并保留各自爬取时间，
-不会覆盖历史结果。相同时间窗口中断后重跑同一命令，会复用对应 `JOBDIR` 继续调度。
+默认严格跳过已经成功导出的公告 ID；正文发生变化需要主动检查时使用
+`--check-updates`。相同日期窗口中断后重跑同一命令，会复用对应 `JOBDIR` 和持久化
+去重索引；已经导出的记录不重复，尚未完成的详情可以重新获取。附件每完成一个就同步
+回 JSON/CSV，已有完整文件直接跳过，`.part` 文件继续使用 HTTP Range 下载。
+
+每条 JSON 的 `_trace` 还会保存当前列表记录、列表 POST 表单、日期窗口、页码、总数、
+列表 HTML 的字节数与 SHA256、详情响应元数据，以及 CMS 附件元数据响应。完整详情 HTML
+仍由快照和 `_trace.rawHtml` 保存，正文由 `_trace.rawText` 保存；这些诊断内容不增加或修改
+数据库字段，导入时写入现有 MongoDB 溯源字段。
 
 ## 离线验证
 
@@ -129,7 +154,8 @@ cd /home/intsig/Crawler_Scrapy
 
 ```bash
 /home/vipuser/miniconda3/bin/conda run -n myenv \
-  python -m unittest tests.test_sxzwfw_parser tests.test_sxzwfw_spider -v
+  python -m pytest tests/test_sxzwfw_parser.py tests/test_sxzwfw_spider.py \
+    tests/test_sxzwfw_exporter.py tests/test_sxzwfw_attachment_downloader.py -q
 ```
 
 规则提取无法确定的字段保持空值；可在人工抽样确认后选择性启用框架 AI 补空接口，AI

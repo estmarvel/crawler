@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from html import unescape
 from typing import Any, Iterable, Mapping
 
@@ -117,8 +118,16 @@ def _combine_text(detail: Mapping[str, Any]) -> str:
         if not normalized or normalized in seen:
             continue
         # annContent经常已经包含reviewSituation/contactInformation等结构化片段。
-        # 子段已完整存在于主正文时不再追加，避免候选人和联系方式重复一遍。
-        if any(normalized in existing for existing in result):
+        # 子段已完整存在于主正文时不再追加；源站包装页偶尔只是在标段号中
+        # 多一个空格，因此同时做去空白后的包含判断。
+        compact = re.sub(r"\s+", "", unicodedata.normalize("NFKC", normalized))
+        if any(
+            normalized in existing
+            or compact in re.sub(
+                r"\s+", "", unicodedata.normalize("NFKC", existing)
+            )
+            for existing in result
+        ):
             continue
         seen.add(normalized)
         result.append(normalized)
@@ -169,13 +178,22 @@ def _extract_label(text: str, labels: Iterable[str]) -> str:
     for index, line in enumerate(lines):
         for label in labels:
             match = re.search(
-                rf"(?:^|\s)(?:\d+(?:\.\d+)*(?:[、.．])?\s*)?"
-                rf"{_flexible_label(label)}\s*[：:]\s*(.*)$",
+                rf"(?:^|[\s；;。])(?:\d+(?:\.\d+)*(?:[、.．])?\s*)?"
+                rf"{_flexible_label(label)}\s*(?:为|是)?\s*[：:]\s*(.*)$",
                 line,
             )
             if not match:
                 continue
-            chunks = [match.group(1).strip()] if match.group(1).strip() else []
+            inline_value = match.group(1).strip()
+            # 同一段经常连续写“合同履行期限：...；交货地点：...；质量要求：...”。
+            # 当前字段只保留下一个中文标签前的内容，避免把后续字段一并吞入。
+            if inline_value:
+                inline_value = re.split(
+                    r"[；;。]\s*(?=[\u4e00-\u9fffA-Za-z/（）()]{1,24}\s*[：:])",
+                    inline_value,
+                    maxsplit=1,
+                )[0].strip()
+            chunks = [inline_value] if inline_value else []
             for following in lines[index + 1 :]:
                 if re.match(r"^(?:\d+(?:\.\d+)*|[一二三四五六七八九十]+)[、.．]\s*", following):
                     break
@@ -219,6 +237,33 @@ def _extract_section(text: str, starts: Iterable[str], stops: Iterable[str]) -> 
             break
         chunks.append(line)
     return re.sub(r"\s+", " ", " ".join(chunks)).strip()
+
+
+def _extract_labeled_section(
+    text: str,
+    labels: Iterable[str],
+    stops: Iterable[str],
+) -> str:
+    """只从独立标签行开始提取多行值，避免在普通正文中命中标签子串。"""
+
+    lines = [line.strip() for line in clean_html_keep_lines(text).splitlines() if line.strip()]
+    labels = tuple(labels)
+    for index, line in enumerate(lines):
+        for label in labels:
+            match = re.match(
+                rf"^(?:\d+(?:\.\d+)*(?:[、.．])?\s*)?"
+                rf"{_flexible_label(label)}\s*(?:为|是)?\s*[：:]\s*(.*)$",
+                line,
+            )
+            if not match:
+                continue
+            chunks = [match.group(1).strip()] if match.group(1).strip() else []
+            for following in lines[index + 1 :]:
+                if any(stop in following for stop in stops):
+                    break
+                chunks.append(following)
+            return re.sub(r"\s+", " ", " ".join(chunks)).strip()
+    return ""
 
 
 def _project_name(value: Any) -> str:
@@ -375,6 +420,27 @@ def _project_numbers(detail: Mapping[str, Any], text: str) -> str:
     return "；".join(values)
 
 
+def _labelled_identifier(text: str, labels: tuple[str, ...]) -> str:
+    """只接受有明确语义标签的编号，防止项目号和招标号相互污染。"""
+
+    for label in sorted(labels, key=len, reverse=True):
+        match = re.search(
+            rf"(?:^|\n)\s*[（(]?(?:\d+(?:\.\d+)*[、.．]?\s*)?"
+            rf"{re.escape(label)}\s*[：:]\s*([^\n]+)",
+            text,
+        )
+        if not match:
+            match = re.search(
+                rf"{re.escape(label)}\s*[：:]\s*([^，,。；;\n]+)", text
+            )
+        if match:
+            value = match.group(1).strip()
+            if value.endswith(("）", ")")):
+                value = value[:-1].rstrip()
+            return value
+    return ""
+
+
 def _extract_tender_scope(text: str) -> str:
     """提取完整招标内容与范围，保留后续001/002等标段内容。"""
 
@@ -395,11 +461,25 @@ def _extract_tender_scope(text: str) -> str:
         "交货期",
         "质量要求",
         "质量标准",
+        "招标控制价",
+        "招标金额",
+        "最高投标限价",
+        "最高限价",
         "项目地点",
         "建设地点",
         "工程地点",
     )
     # 先找具体子标题，避免在“项目概况和招标范围”大章节处过早开始。
+    scope = _extract_labeled_section(
+        text,
+        ("招标内容与范围", "招标范围"),
+        stops,
+    )
+    if scope:
+        return scope
+    scope = _extract_label(text, ("招标内容与范围", "招标范围"))
+    if scope:
+        return scope
     scope = _extract_section(text, ("招标内容与范围",), stops)
     if scope:
         return scope
@@ -408,6 +488,73 @@ def _extract_tender_scope(text: str) -> str:
         ("项目概况与招标范围", "项目概况和招标范围", "招标范围"),
         stops,
     )
+
+
+def _extract_duration(text: str) -> str:
+    """兼容同段标签和“交货期：\n第一标段...”等多行期限。"""
+
+    labels = (
+        "合同履行期限", "监理服务期限", "合同服务期限",
+        "计划工期", "建设工期", "施工工期",
+        "服务期限", "服务周期", "服务期", "供货期限", "供货期",
+        "交货期限", "交货期", "工期",
+    )
+    value = _extract_label(text, labels)
+    if value:
+        return value
+    return _extract_labeled_section(
+        text,
+        labels,
+        (
+            "交货地点", "供货地点", "服务地点", "项目地点", "建设地点",
+            "质量要求", "质量标准", "投标人资格要求", "申请人资格要求",
+            "招标文件的获取", "资格预审文件的获取",
+        ),
+    )
+
+
+def _extract_quality(text: str) -> str:
+    """提取通用及设计、施工、服务等分项质量要求。"""
+
+    labels = (
+        "服务质量要求", "设计要求的质量标准", "施工要求的质量标准",
+        "采购质量要求", "技术质量要求", "质量要求", "质量标准",
+    )
+    values = [_extract_label(text, (label,)) for label in labels]
+    values = [value for value in values if value]
+    if values:
+        return _join_distinct(*values, separator="；")
+    return _extract_labeled_section(
+        text,
+        labels,
+        (
+            "投标人资格要求", "申请人资格要求", "招标文件的获取",
+            "资格预审文件的获取", "联系方式",
+        ),
+    )
+
+
+def _extract_manager_certificate(text: str) -> tuple[str, str]:
+    """提取中标结果中项目经理证书名称与编号，兼容合并标签。"""
+
+    name = _extract_label(text, ("项目经理证书名称", "证书名称"))
+    number = _extract_label(text, ("项目经理证书编号", "证书编号"))
+    if name or number:
+        return name, number
+
+    combined = _extract_label(
+        text,
+        ("项目经理相关证书及编号", "证书名称及编号", "证书名称和编号"),
+    ).rstrip("；;。")
+    if not combined:
+        return "", ""
+    match = re.match(
+        r"^(.*?)[、,，]\s*([A-Za-z0-9][A-Za-z0-9./-]{3,})\s*$",
+        combined,
+    )
+    if match:
+        return match.group(1).strip(), match.group(2).strip()
+    return combined, ""
 
 
 def _extract_acquisition_way(text: str) -> str:
@@ -501,10 +648,12 @@ def _candidate_name_price_pairs(text: str) -> tuple[list[str], list[str]]:
         r"^第\s*[一二三四五六七八九十百\d]+\s*名\s*[：:]\s*(.+)$"
     )
     inline_price_pattern = re.compile(
-        r"(投标总报价|投标报价|响应报价|投标价格|报价)\s*[：:]\s*([^，,；;]+)"
+        r"(投标总报价|投标报价|响应报价|投标价格|报价)"
+        r"(?:\s*[（(][^）)\n]{1,80}[）)])?\s*[：:]\s*([^，,；;]+)"
     )
     price_pattern = re.compile(
-        r"(.{0,40}?(?:投标总报价|投标报价|响应报价|投标价格|报价))\s*[：:]\s*(.+)$"
+        r"(.{0,40}?(?:投标总报价|投标报价|响应报价|投标价格|报价)"
+        r"(?:\s*[（(][^）)\n]{1,80}[）)])?)\s*[：:]\s*(.+)$"
     )
     names: list[str] = []
     prices: list[str] = []
@@ -892,13 +1041,16 @@ class HuaxinParser:
         if not notice_type:
             return "", "", {}, []
 
-        data = create_empty_notice_data(notice_type)
+        data = create_empty_notice_data(
+            notice_type, include_parser_diagnostics=True
+        )
         extractor = getattr(cls, f"_extract_{subtype}")
         extractor(data, detail)
         attachments = _attachments(detail)
-        data["附件"] = attachments
-        data = canonicalize_notice_data(notice_type, data)
-        return subtype, notice_type, data, data["附件"]
+        data = canonicalize_notice_data(
+            notice_type, data, include_parser_diagnostics=True
+        )
+        return subtype, notice_type, data, attachments
 
     @classmethod
     def detail_url(cls, subtype: str, detail: Mapping[str, Any]) -> str:
@@ -955,6 +1107,16 @@ class HuaxinParser:
                 or detail.get("purName")
                 or detail.get("projectName")
             )
+        if "项目编号" in data:
+            data["项目编号"] = _labelled_identifier(
+                text,
+                ("招标项目编号", "项目编号", "投资项目统一代码", "项目代码"),
+            ) or _string(detail.get("diyProjectNo"))
+        if "招标编号" in data:
+            data["招标编号"] = _labelled_identifier(
+                text,
+                ("招标编号", "采购编号", "代理编号"),
+            ) or _string(detail.get("purDiyCode"))
         if "所属行业" in data:
             data["所属行业"] = _string(detail.get("industryName"))
         if "组织形式" in data:
@@ -1025,7 +1187,13 @@ class HuaxinParser:
         data["项目编号/招标编号"] = _project_numbers(detail, text)
         data["项目类型/行业分类"] = _string(detail.get("classificationName") or detail.get("industryName"))
         data["项目总投资/估算金额"] = _extract_label(text, ("项目总投资", "估算金额", "项目估算"))
-        data["招标金额"] = _extract_label(text, ("招标金额", "最高限价", "最高投标限价"))
+        data["招标金额"] = _extract_label(
+            text,
+            (
+                "招标金额", "招标控制价", "最高投标限价", "最高限价",
+                "采购预算", "预算金额", "控制价",
+            ),
+        )
         funding_source = _extract_label(text, ("资金来源", "项目资金来源"))
         if not funding_source:
             match = re.search(
@@ -1043,23 +1211,9 @@ class HuaxinParser:
         if "项目规模" in data:
             data["项目规模"] = _extract_label(text, ("项目规模", "建设规模", "工程规模"))
         if "工期/服务期/供货日期" in data:
-            data["工期/服务期/供货日期"] = _extract_label(
-                text,
-                (
-                    "工期",
-                    "计划工期",
-                    "服务期限",
-                    "服务周期",
-                    "服务期",
-                    "合同履行期限",
-                    "供货期限",
-                    "供货期",
-                    "交货期限",
-                    "交货期",
-                ),
-            )
+            data["工期/服务期/供货日期"] = _extract_duration(text)
         if "质量要求" in data:
-            data["质量要求"] = _extract_label(text, ("质量要求", "质量标准"))
+            data["质量要求"] = _extract_quality(text)
         overview = "\n".join(filter(None, (clean_html(detail.get("projectOverview")), clean_html(detail.get("bidOverview")))))
         if not overview:
             overview = _extract_tender_scope(text)
@@ -1151,6 +1305,13 @@ class HuaxinParser:
         data["中标结果明细"] = details
         data["中标人名称"] = [item["中标人名称"] for item in details]
         data["中标价"] = [item["中标价"] for item in details]
+        data["工期"] = _extract_duration(text)
+        data["项目经理"] = _extract_label(
+            text, ("项目经理", "项目负责人")
+        ).rstrip("；;。")
+        certificate_name, certificate_number = _extract_manager_certificate(text)
+        data["项目经理证书名称"] = certificate_name
+        data["项目经理证书编号"] = certificate_number
         cls._fill_contacts(data, detail, contact)
 
     @classmethod

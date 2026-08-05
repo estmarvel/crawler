@@ -1,0 +1,91 @@
+# Local agent/editor state
+/.agents/
+/.codex/
+**/.claude/
+**/.windsurf/
+.idea/
+.vscode/
+
+# Secrets and local environment files
+**/.env
+**/.env.*
+!**/.env.example
+!**/.env.*.example
+*.pem
+*.key
+
+# Python / Node build and dependency artifacts
+**/__pycache__/
+**/*.py[cod]
+**/.pytest_cache/
+**/.mypy_cache/
+**/.ruff_cache/
+**/.coverage
+**/htmlcov/
+**/.venv/
+**/venv/
+**/node_modules/
+**/dist/
+**/build/
+
+# Crawler runtime output, snapshots, attachments, logs and resumable state
+**/output/
+**/new_output/
+**/test_output/
+**/logs/
+**/httpcache/
+**/jobstate/
+**/*.part
+
+# Local database files, dumps and recovery backups
+/mysql_data/
+/backups/
+*.db
+*.sqlite
+*.sqlite3
+*.sql.gz
+*.archive
+*.archive.gz
+*.dump
+
+# Generated reports and transient runtime files
+**/reports/
+*.log
+*.pid
+*.tmp
+*.bak
+*~
+.DS_Store
+
+# Separate/local workspaces that are not part of this crawler repository
+/recommendation/
+/data/
+/project/
+/refactor/
+
+# Local Qianji prototype is outside the current five-site release.
+/Crawler_Scrapy/crawler_scrapy/docs/qianji/
+/Crawler_Scrapy/crawler_scrapy/sites/qianji/
+/Crawler_Scrapy/crawler_scrapy/spiders/qianji.py
+/Crawler_Scrapy/install_qianji_daily_cron.sh
+/Crawler_Scrapy/run_qianji_daily.py
+/Crawler_Scrapy/run_qianji_daily.sh
+/Crawler_Scrapy/run_qianji_history.sh
+/Crawler_Scrapy/tests/test_qianji_spider.py
+
+# Superseded local handoff/deployment drafts; maintained docs are under
+# Crawler_Scrapy/crawler_scrapy/docs.
+/Crawler_Scrapy/docs/JSON字段到新数据库映射.md
+/Crawler_Scrapy/docs/SXJM爬取与前后端接入交接说明.md
+/Crawler_Scrapy/docs/Windows原生运行详细适配方案.md
+/Crawler_Scrapy/docs/sxjm前后端采集任务接入方案.md
+
+# Root-level handoff notes and spreadsheets are local working material.
+# Maintained project documentation lives under Crawler_Scrapy/docs and
+# Crawler_Scrapy/crawler_scrapy/docs.
+/*.md
+!/README.md
+/*.xlsx
+/*.xls
+/*.docx
+/*.pdf

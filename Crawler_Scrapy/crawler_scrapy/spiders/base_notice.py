@@ -6,6 +6,7 @@ import hashlib
 import json
 from datetime import date, datetime
 from typing import Any, Mapping, Sequence
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import scrapy
 
@@ -34,6 +35,94 @@ class BaseNoticeSpider(scrapy.Spider):
     # None 表示由框架选择当前公告全部缺失业务字段。具体网站也可配置：
     # {"招标公告": ("项目名称", "招标金额"), "*": ("项目名称",)}
     ai_extract_fields: Mapping[str, Sequence[str]] | None = None
+
+    TRACE_RESPONSE_HEADERS = (
+        "Content-Type",
+        "Content-Length",
+        "ETag",
+        "Last-Modified",
+        "Date",
+        "Cache-Control",
+    )
+    TRACE_SECRET_QUERY_KEYS = frozenset({
+        "accesskey", "accesstoken", "apikey", "authorization", "key",
+        "password", "passwd", "pwd", "secret", "sign", "signature", "token",
+    })
+
+    @classmethod
+    def _sanitize_trace_url(cls, value: Any) -> str:
+        """保留可复现 URL，同时移除 userinfo 和常见查询凭据。"""
+
+        text = str(value or "")
+        if not text:
+            return ""
+        try:
+            parts = urlsplit(text)
+            netloc = parts.netloc.rsplit("@", 1)[-1]
+            query = urlencode([
+                (
+                    key,
+                    "[REDACTED]"
+                    if key.lower().replace("_", "").replace("-", "")
+                    in cls.TRACE_SECRET_QUERY_KEYS
+                    else item,
+                )
+                for key, item in parse_qsl(parts.query, keep_blank_values=True)
+            ])
+            return urlunsplit((parts.scheme, netloc, parts.path, query, parts.fragment))
+        except (TypeError, ValueError):
+            return ""
+
+    @classmethod
+    def build_response_metadata(
+        cls,
+        response: Any,
+        *,
+        request_kind: str = "detail",
+        context: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """生成不含认证信息的请求/响应溯源元数据。"""
+
+        request = getattr(response, "request", None)
+        headers = getattr(response, "headers", None)
+        selected_headers: dict[str, str] = {}
+        if headers is not None:
+            for name in cls.TRACE_RESPONSE_HEADERS:
+                value = headers.get(name)
+                if value in (None, b"", ""):
+                    continue
+                selected_headers[name.lower()] = (
+                    value.decode("latin-1", errors="replace")
+                    if isinstance(value, bytes)
+                    else str(value)
+                )
+        meta = getattr(request, "meta", {}) if request is not None else {}
+        try:
+            encoding = str(getattr(response, "encoding", "") or "")
+        except (AttributeError, TypeError):
+            encoding = ""
+        return {
+            "requestKind": request_kind,
+            "request": {
+                "url": cls._sanitize_trace_url(getattr(request, "url", "")),
+                "method": str(getattr(request, "method", "GET") or "GET"),
+            },
+            "response": {
+                "url": cls._sanitize_trace_url(getattr(response, "url", "")),
+                "status": int(getattr(response, "status", 0) or 0),
+                "encoding": encoding,
+                "headers": selected_headers,
+            },
+            "download": {
+                "latencySeconds": meta.get("download_latency"),
+                "retryTimes": int(meta.get("retry_times") or 0),
+                "redirectUrls": [
+                    cls._sanitize_trace_url(value)
+                    for value in meta.get("redirect_urls", [])
+                ],
+            },
+            "context": dict(context or {}),
+        }
 
     def select_ai_extract_fields(
         self,
@@ -156,6 +245,7 @@ class BaseNoticeSpider(scrapy.Spider):
         extraction_version: str = "",
         is_verified: bool = False,
         field_meta: Mapping[str, Any] | None = None,
+        response_metadata: Mapping[str, Any] | None = None,
         source_list_fingerprint: str = "",
         attachments: Sequence[Mapping[str, Any]] | None = None,
     ) -> NoticeItem:
@@ -203,20 +293,6 @@ class BaseNoticeSpider(scrapy.Spider):
             or ""
         ).strip()
 
-        normalized_data["爬虫时间"] = crawl_time
-        normalized_data["详情页链接"] = actual_detail_url
-        normalized_data["公告正文"] = raw_text_value
-        normalized_data["解析状态"] = parse_status_value
-        normalized_data["内容指纹"] = fingerprint_value
-        normalized_data["抽取方式"] = extraction_model_value
-        normalized_data["抽取版本"] = extraction_version_value
-        normalized_data["是否已核验"] = bool(is_verified)
-
-        if attachment_list:
-            normalized_data["附件"] = attachment_list
-        elif normalized_data.get("附件") in (None, ""):
-            normalized_data["附件"] = []
-
         file_urls: list[str] = []
         for attachment in attachment_list:
             url = (
@@ -241,6 +317,7 @@ class BaseNoticeSpider(scrapy.Spider):
         item["data"] = normalized_data
         item["field_meta"] = field_meta_value
         item["raw_data"] = raw_data
+        item["response_metadata"] = dict(response_metadata or {})
         item["raw_html"] = raw_html
         item["raw_text"] = raw_text_value
         item["parse_status"] = parse_status_value

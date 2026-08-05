@@ -6,7 +6,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 
 const PROJECT_ROOT = path.resolve(__dirname, "..");
-const DEFAULT_OUTPUT_ROOT = path.resolve(PROJECT_ROOT, "../Crawler_Scrapy/output");
+const DEFAULT_OUTPUT_ROOT = path.resolve(PROJECT_ROOT, "../Crawler_Scrapy/new_output");
 
 // Folder/platform code -> existing data_source.id. Database short_code is not checked.
 const SITE_CONFIG = Object.freeze({
@@ -22,6 +22,8 @@ const EXTRACTION_FIELDS = Object.freeze({
     "项目性质",
     "招标方式",
     "项目名称",
+    "项目编号",
+    "招标编号",
     "项目类型",
     "项目总投资",
     "招标内容",
@@ -36,6 +38,8 @@ const EXTRACTION_FIELDS = Object.freeze({
   资格预审公告: Object.freeze([
     "项目性质",
     "项目名称",
+    "项目编号",
+    "招标编号",
     "所属行业",
     "组织形式",
     "开标时间",
@@ -70,6 +74,8 @@ const EXTRACTION_FIELDS = Object.freeze({
   招标公告: Object.freeze([
     "项目性质",
     "项目名称",
+    "项目编号",
+    "招标编号",
     "所属行业",
     "组织形式",
     "开标时间",
@@ -107,6 +113,8 @@ const EXTRACTION_FIELDS = Object.freeze({
   中标候选人公示: Object.freeze([
     "项目性质",
     "项目名称",
+    "项目编号",
+    "招标编号",
     "所属行业",
     "组织形式",
     "开标时间",
@@ -128,6 +136,8 @@ const EXTRACTION_FIELDS = Object.freeze({
   定标候选人公示: Object.freeze([
     "项目性质",
     "项目名称",
+    "项目编号",
+    "招标编号",
     "所属行业",
     "组织形式",
     "开标时间",
@@ -157,6 +167,8 @@ const EXTRACTION_FIELDS = Object.freeze({
   中标结果公示: Object.freeze([
     "项目性质",
     "项目名称",
+    "项目编号",
+    "招标编号",
     "所属行业",
     "组织形式",
     "招标方式",
@@ -183,6 +195,8 @@ const EXTRACTION_FIELDS = Object.freeze({
   更正结果公示: Object.freeze([
     "公共类型",
     "项目名称",
+    "项目编号",
+    "招标编号",
     "所属行业",
     "组织形式",
     "开标时间",
@@ -206,6 +220,7 @@ const EXTRACTION_FIELDS = Object.freeze({
   合同与履约: Object.freeze([
     "项目名称",
     "项目编号",
+    "招标编号",
     "合同名称",
     "招标人名称",
     "中标人名称",

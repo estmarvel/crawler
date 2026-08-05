@@ -5,3 +5,6 @@ __pycache__/
 httpcache/
 jobstate/
 output/
+new_output/
+test_output/
+logs/

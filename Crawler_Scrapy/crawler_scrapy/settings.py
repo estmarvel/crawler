@@ -348,6 +348,10 @@ NOTICE_EXPORT_DIAGNOSTICS = True
 # 多数网站只包含八类公告中的一部分，默认只创建实际抓到的类型文件。
 NOTICE_EXPORT_EMPTY_FILES = False
 
+# JSON 额外保存 `_trace` 溯源包，字段与 MongoDB raw_notices 对齐；CSV 仍只
+# 输出原有主字段，避免大段原始 JSON/HTML 改变既有表头。
+NOTICE_EXPORT_TRACE = True
+
 # 启用跨运行去重。索引保存在 output/<网站代码>/state/notice_versions.json。
 # 不使用数据库；同一公告内容变化时追加新版本，旧版本不覆盖。
 NOTICE_DEDUP_ENABLED = True

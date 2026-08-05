@@ -247,10 +247,33 @@ def _procurement_method(title: str, text: str) -> str:
     return ""
 
 
+def _corrected_event_time(text: str) -> str:
+    """取更正表中最后出现的开标/开启/截止时间，即更正后的值。"""
+
+    values: list[str] = []
+    datetime_pattern = (
+        r"(\d{4}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*日\s*"
+        r"\d{1,2}\s*[：:]\s*\d{2}(?:\s*[：:]\s*\d{2})?|"
+        r"\d{4}[-/.]\d{1,2}[-/.]\d{1,2}\s+\d{1,2}:\d{2}(?::\d{2})?)"
+    )
+    for label in ("开标时间", "开启时间", "响应文件提交截止时间"):
+        pattern = rf"{re.escape(label)}\s*[：:]\s*{datetime_pattern}"
+        for match in re.finditer(pattern, text):
+            value = _space(match.group(1))
+            value = value.replace("年", "-").replace("月", "-")
+            value = value.replace("日", " ").replace("：", ":")
+            value = re.sub(r"\s*([-:])\s*", r"\1", value)
+            values.append(_space(value))
+    return values[-1] if values else _inline_label(
+        text,
+        ("开标时间", "开启时间", "响应文件提交截止时间"),
+    )
+
+
 class SxzwfwGovernmentProcurementParser:
     """把政府采购更正、结果 HTML 转换为框架预设公告字段。"""
 
-    parser_version = "sxzwfw-zfcg-v1"
+    parser_version = "sxzwfw-zfcg-v3-trace"
     extraction_model_name = "sxzwfw-zfcg-rule-parser"
     supported_sections = frozenset(config.GOVERNMENT_SECTION_CHANNELS)
 
@@ -280,7 +303,9 @@ class SxzwfwGovernmentProcurementParser:
         source_nature = _source_nature(section, title)
         notice_type = "更正结果公示" if section == "zc_gz" else "中标结果公示"
         subtype = "gzjg" if section == "zc_gz" else "zbjg"
-        data = create_empty_notice_data(notice_type)
+        data = create_empty_notice_data(
+            notice_type, include_parser_diagnostics=True
+        )
         project_name = _project_name(document, raw_text, title)
         contacts = _contact_blocks(raw_text)
 
@@ -288,10 +313,7 @@ class SxzwfwGovernmentProcurementParser:
             data["公共类型"] = source_nature
             data["项目名称"] = project_name
             data["公告内容"] = raw_text
-            data["开标时间"] = _inline_label(
-                raw_text,
-                ("开标时间", "开启时间", "响应文件提交截止时间"),
-            )
+            data["开标时间"] = _corrected_event_time(raw_text)
             data["标书发售时间"] = _time_range(
                 raw_text,
                 ("获取采购文件时间", "采购文件获取时间", "获取时间"),
@@ -345,8 +367,9 @@ class SxzwfwGovernmentProcurementParser:
         attachments = direct + [
             value for value in placeholders if value["source_file_id"] not in direct_ids
         ]
-        data["附件"] = attachments
-        normalized = canonicalize_notice_data(notice_type, data)
+        normalized = canonicalize_notice_data(
+            notice_type, data, include_parser_diagnostics=True
+        )
         return ParsedNotice(
             subtype=subtype,
             notice_type=notice_type,
@@ -355,6 +378,6 @@ class SxzwfwGovernmentProcurementParser:
             source_nature=source_nature,
             raw_text=raw_text,
             data=normalized,
-            attachments=normalized["附件"],
+            attachments=attachments,
             cms_attachment=cms_info,
         )

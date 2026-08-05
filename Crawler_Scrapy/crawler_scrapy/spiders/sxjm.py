@@ -22,8 +22,8 @@ class SxjmSpider(BaseNoticeSpider):
     platform_name = config.PLATFORM_NAME
     platform_code = config.PLATFORM_CODE
     allowed_domains = ["www.sxccdzzcpt.cn"]
-    parser_version = "sxjm-v1"
-    extraction_model_name = "sxjm-rule-parser"
+    parser_version = "sxjm-v11-source-type-preserved"
+    extraction_model_name = "sxjm-site-rule-parser"
 
     custom_settings = {
         "ROBOTSTXT_OBEY": False,
@@ -31,14 +31,19 @@ class SxjmSpider(BaseNoticeSpider):
         "DOWNLOAD_DELAY": 0.5,
         "AUTOTHROTTLE_ENABLED": True,
         "AUTOTHROTTLE_TARGET_CONCURRENCY": 1.0,
-        "NOTICE_SNAPSHOT_ENABLED": False,
+        # 详情 API 的 content 是源站实际公告 HTML。独立保存该原文，并由
+        # Pipeline 回写 HTML快照路径/SHA256；JSON _trace.rawHtml 同时保留
+        # 可直接导入 MongoDB raw_notices.rawHtml 的副本。
+        "NOTICE_SNAPSHOT_ENABLED": True,
+        # 极少数源站记录可能只有结构化字段而没有 content；不能因此丢掉
+        # 整条公告，空 HTML 由 Pipeline 告警并保留原始 JSON payload。
         "NOTICE_SNAPSHOT_REQUIRED": False,
         "NOTICE_ATTACHMENT_DOWNLOAD_ENABLED": True,
     }
 
     @classmethod
     def update_settings(cls, settings) -> None:
-        """仅对本站替换最终导出器，使终止公告生成独立文件。"""
+        """替换最终导出器，并为服务器本机直连启用限流保护。"""
 
         super().update_settings(settings)
         pipelines = settings.getdict("ITEM_PIPELINES")
@@ -47,6 +52,63 @@ class SxjmSpider(BaseNoticeSpider):
             "crawler_scrapy.sites.sxjm.exporter.SxjmMultiFormatPipeline"
         ] = 300
         settings.set("ITEM_PIPELINES", pipelines, priority="spider")
+
+        mode = str(settings.get("CRAWLER_OUTBOUND_MODE", "direct")).strip().lower()
+        if mode != "direct":
+            return
+        middlewares = settings.getdict("DOWNLOADER_MIDDLEWARES")
+        middlewares[
+            "crawler_scrapy.transport.access_guard.DirectAccessGuardMiddleware"
+        ] = 650
+        settings.set("DOWNLOADER_MIDDLEWARES", middlewares, priority="spider")
+        settings.set("HTTPPROXY_ENABLED", False, priority="spider")
+        settings.set(
+            "CONCURRENT_REQUESTS",
+            settings.getint("DIRECT_CONCURRENT_REQUESTS", 1),
+            priority="spider",
+        )
+        settings.set(
+            "CONCURRENT_REQUESTS_PER_DOMAIN",
+            settings.getint("DIRECT_CONCURRENT_REQUESTS_PER_DOMAIN", 1),
+            priority="spider",
+        )
+        settings.set(
+            "DOWNLOAD_DELAY",
+            settings.getfloat("DIRECT_DOWNLOAD_DELAY", 5.0),
+            priority="spider",
+        )
+        settings.set("RANDOMIZE_DOWNLOAD_DELAY", True, priority="spider")
+        settings.set("AUTOTHROTTLE_ENABLED", True, priority="spider")
+        settings.set(
+            "AUTOTHROTTLE_START_DELAY",
+            settings.getfloat("DIRECT_AUTOTHROTTLE_START_DELAY", 5.0),
+            priority="spider",
+        )
+        settings.set(
+            "AUTOTHROTTLE_MAX_DELAY",
+            settings.getfloat("DIRECT_AUTOTHROTTLE_MAX_DELAY", 120.0),
+            priority="spider",
+        )
+        settings.set(
+            "AUTOTHROTTLE_TARGET_CONCURRENCY",
+            settings.getfloat("DIRECT_AUTOTHROTTLE_TARGET_CONCURRENCY", 0.25),
+            priority="spider",
+        )
+        settings.set(
+            "RETRY_TIMES",
+            settings.getint("DIRECT_RETRY_TIMES", 0),
+            priority="spider",
+        )
+        settings.set(
+            "DOWNLOAD_TIMEOUT",
+            settings.getint("DIRECT_DOWNLOAD_TIMEOUT", 180),
+            priority="spider",
+        )
+        settings.set(
+            "CLOSESPIDER_PAGECOUNT",
+            settings.getint("DIRECT_MAX_RESPONSES_PER_RUN", 300),
+            priority="spider",
+        )
 
     def __init__(
         self,
@@ -170,11 +232,21 @@ class SxjmSpider(BaseNoticeSpider):
         )
 
     @staticmethod
-    def _record_time(record: Mapping[str, Any]) -> datetime | None:
+    def _source_publish_time(record: Mapping[str, Any]) -> str:
         for key in ("publish_time_format", "publish_time", "created_at_format", "created_at"):
-            parsed = coerce_datetime(record.get(key))
-            if parsed is not None:
-                return parsed
+            value = str(record.get(key) or "").strip()
+            parsed = coerce_datetime(value)
+            # 部分招标计划把缺失发布时间序列化为 Unix 零值；不能把它当成
+            # 真实业务时间，应继续回退到 created_at。
+            if parsed is not None and parsed.year > 1970:
+                return value
+        return ""
+
+    @classmethod
+    def _record_time(cls, record: Mapping[str, Any]) -> datetime | None:
+        value = cls._source_publish_time(record)
+        if value:
+            return coerce_datetime(value)
         return None
 
     def _inside_window(self, record: Mapping[str, Any]) -> bool:
@@ -190,14 +262,39 @@ class SxjmSpider(BaseNoticeSpider):
         announcement_type: str, page: int
     ):
         feed = (channel, section, announcement_type)
-        result = decrypt_envelope(response.json())
+        envelope = response.json()
+        result = decrypt_envelope(envelope)
         if not isinstance(result, Mapping):
             self.logger.warning("列表返回类型异常: section=%s page=%s", section, page)
             return
         records = result.get("data") or []
         if not isinstance(records, list):
             records = []
+        request_params = config.list_params(
+            channel, announcement_type, page, self.page_size
+        )
+        list_trace = {
+            "responseMetadata": self.build_response_metadata(
+                response,
+                request_kind="list_api",
+                context={
+                    "channel": channel,
+                    "section": section,
+                    "announcementType": announcement_type,
+                    "page": page,
+                    "pageSize": self.page_size,
+                },
+            ),
+            "requestParams": request_params,
+            "businessEnvelope": {
+                key: value for key, value in envelope.items() if key != "result"
+            },
+            "pagination": {
+                key: value for key, value in result.items() if key != "data"
+            },
+        }
 
+        scheduled_before = self._scheduled_counts[feed]
         for record in records:
             if not isinstance(record, Mapping) or not self._inside_window(record):
                 continue
@@ -213,20 +310,44 @@ class SxjmSpider(BaseNoticeSpider):
                 list_record=record,
                 detail_url=detail_url,
                 title=str(record.get("title") or ""),
-                publish_time=record.get("publish_time_format") or record.get("publish_time"),
+                publish_time=self._source_publish_time(record),
             )
             if not should_fetch:
                 continue
             self._scheduled_counts[feed] += 1
+            record_with_trace = dict(record)
+            record_with_trace["_crawler_list_trace"] = list_trace
             yield Request(
                 config.DETAIL_URL.format(notice_id=notice_id),
                 callback=self.parse_detail,
+                # 列表阶段的持久化公告索引才是跨运行事实来源。这里不让
+                # JOBDIR 的 URL 去重永久吞掉“已请求但尚未来得及导出”的详情，
+                # 也允许显式 --check-updates 时重新获取内容发生变化的同一 URL。
+                dont_filter=True,
                 cb_kwargs={
                     "channel": channel,
                     "section": section,
-                    "list_record": dict(record),
+                    "announcement_type": announcement_type,
+                    "list_record": record_with_trace,
                     "list_fingerprint": list_fingerprint,
                 },
+            )
+
+        crawler = getattr(self, "crawler", None)
+        if crawler is not None and crawler.settings.getbool(
+            "SXJM_PROGRESS_LOG_LIST", False
+        ):
+            self.logger.info(
+                "[SXJM列表进度] 频道=%s 栏目=%s 编码=%s 页=%s "
+                "本页=%s 总数=%s 新增详情=%s 当前feed已安排=%s",
+                channel,
+                section,
+                announcement_type,
+                page,
+                len(records),
+                result.get("total") or 0,
+                self._scheduled_counts[feed] - scheduled_before,
+                self._scheduled_counts[feed],
             )
 
         total = int(result.get("total") or 0)
@@ -243,35 +364,88 @@ class SxjmSpider(BaseNoticeSpider):
         response: Response,
         channel: str,
         section: str,
+        announcement_type: str,
         list_record: Mapping[str, Any],
         list_fingerprint: str,
     ):
-        result = decrypt_envelope(response.json())
+        envelope = response.json()
+        result = decrypt_envelope(envelope)
         if not isinstance(result, Mapping):
             self.logger.warning("详情返回类型异常: %s", response.url)
             return
-        detail = {**dict(list_record), **dict(result)}
+        source_list = dict(list_record)
+        list_trace = source_list.pop("_crawler_list_trace", None)
+        source_detail = dict(result)
+        detail = {**source_list, **source_detail}
+        # 详情接口中的 announcement_type 偶有缺失或历史值不一致；请求列表时
+        # 使用的编码才是本次分类依据，单独保留，且不覆盖原始响应。
+        detail["_crawler_announcement_type"] = str(announcement_type)
         subtype, notice_type, data, attachments = SxjmParser.parse(
             channel, section, detail
         )
+        if subtype != section:
+            raise ValueError(
+                f"SXJM解析栏目不一致: requested={section} parsed={subtype}"
+            )
         if not notice_type:
             self.logger.warning("无法识别公告类型: id=%s section=%s", detail.get("id"), section)
             return
         notice_id = str(detail.get("id") or "")
         raw_html = SxjmParser.raw_html(detail)
+        response_metadata = self.build_response_metadata(
+            response,
+            request_kind="detail_api",
+            context={
+                "channel": channel,
+                "section": section,
+                "announcementType": str(announcement_type),
+            },
+        )
+        response_metadata["businessEnvelope"] = {
+            key: value for key, value in envelope.items() if key != "result"
+        }
+        if isinstance(list_trace, Mapping):
+            response_metadata["relatedRequests"] = {
+                "list": list_trace.get("responseMetadata"),
+            }
+            response_metadata["listBusinessEnvelope"] = list_trace.get(
+                "businessEnvelope"
+            )
         yield self.build_notice_item(
             notice_type=notice_type,
-            notice_subtype=f"{channel}.{section}",
+            notice_subtype=f"{channel}.{subtype}",
             notice_id=notice_id,
             title=str(detail.get("title") or detail.get("project_name") or ""),
-            publish_time=detail.get("publish_time_format") or detail.get("publish_time"),
+            publish_time=self._source_publish_time(detail),
             detail_url=config.detail_page_url(notice_id),
             data=data,
-            raw_data=detail,
+            raw_data={
+                "list": source_list,
+                "detail": source_detail,
+                "transport": {
+                    "list": list_trace,
+                    "detailEnvelope": response_metadata["businessEnvelope"],
+                },
+            },
             raw_html=raw_html,
             raw_text=SxjmParser.raw_text(detail),
             extraction_model=self.extraction_model_name,
             extraction_version=self.parser_version,
+            response_metadata=response_metadata,
+            field_meta={
+                "site_parser": self.parser_version,
+                "channel": channel,
+                "section": section,
+                "source_notice_type": config.source_notice_type(section),
+                "source_section_label": config.section_label(channel, section),
+                "source_announcement_type": str(announcement_type),
+                "source_announcement_type_label": config.announcement_type_label(
+                    announcement_type
+                ),
+                "source_notice_nature": data.get("源站公告性质", ""),
+                "schema_notice_type": config.schema_notice_type(section),
+                "detail_source": "decrypted_detail_api",
+            },
             source_list_fingerprint=list_fingerprint,
             attachments=attachments,
         )

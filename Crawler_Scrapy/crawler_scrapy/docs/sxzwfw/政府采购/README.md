@@ -42,14 +42,13 @@ ext=
 
 ```bash
 cd /home/intsig/Crawler_Scrapy
-./run_sxzwfw_test.sh --module government
+./run_sxzwfw.sh --phase notices --sections zc_gz,zc_jg \
+  --days 365 --max-records 5 --output-root /tmp/sxzwfw_government_test
 ```
 
-默认在最近 365 天内获取每类最新 5 条，共 10 条。每次写入独立的
-`test_output/sxzwfw_government_5_each_<运行时间>/`，不会受历史去重索引影响，也不会
-混入工程建设或正式结果。脚本结束时会逐类检查构建数量、最终是否导出 10 条，以及关键
-字段、供应商—金额配对、HTML快照和附件下载；详细结果写入
-`government_validation_report.json`。联系方式在源正文存在但结构化字段为空时会报告警告。
+上述命令在最近 365 天内获取每类最新 5 条，共 10 条，并写入独立临时目录，
+不会混入正式 `new_output`。采集后可运行站点审计器核对关键字段、供应商—金额配对、
+HTML 快照和附件清单。
 
 ## 采购公告 channelId=18 预留方法（当前禁用）
 

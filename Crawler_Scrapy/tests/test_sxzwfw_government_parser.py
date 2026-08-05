@@ -210,6 +210,22 @@ class SxzwfwGovernmentProcurementParserTest(unittest.TestCase):
         self.assertEqual(parsed.data["招标代理机构联系方式"], "0351-2222222")
         self.assertIn("响应文件提交截止时间", parsed.data["公告内容"])
 
+    def test_correction_table_uses_the_last_changed_opening_time(self):
+        page = correction_html().replace(
+            b"<p>\xe5\x93\x8d\xe5\xba\x94\xe6\x96\x87\xe4\xbb\xb6\xe6\x8f\x90\xe4\xba\xa4\xe6\x88\xaa\xe6\xad\xa2\xe6\x97\xb6\xe9\x97\xb4\xef\xbc\x9a2026-07-20 09:30</p>",
+            (
+                "<p>2开标时间开标时间：2026年07月31日09：00"
+                "开标时间：2026年08月18日09：00</p>"
+            ).encode("utf-8"),
+        )
+
+        parsed = SxzwfwGovernmentProcurementParser.parse(
+            "zc_gz", page, {"notice_id": "correction-time"},
+            "https://prec.sxzwfw.gov.cn/jyxxzcgz/correction-time.jhtml",
+        )
+
+        self.assertEqual(parsed.data["开标时间"], datetime(2026, 8, 18, 9, 0))
+
     def test_spider_dispatches_government_result_parser(self):
         spider = SxzwfwSpider(sections="zc_jg", days=1)
         page = (DOCS / "山西省公共资源交易平台详情页.html").read_bytes()

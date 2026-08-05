@@ -47,6 +47,13 @@ class SxjmMultiFormatPipeline(NoticeMultiFormatPipeline):
         except KeyError as exc:
             raise ValueError(f"未知山西焦煤导出路由：{route}") from exc
 
+    @staticmethod
+    def _is_termination(subtype: str, data: dict, title: str = "") -> bool:
+        nature = str(data.get("源站公告性质") or "")
+        return subtype.endswith(".zzgg") or any(
+            keyword in f"{nature} {title}" for keyword in ("终止", "撤销")
+        )
+
     def _fieldnames(self, notice_type: str) -> list[str]:
         _, schema_type = self._route_config(notice_type)
         return super()._fieldnames(schema_type)
@@ -108,7 +115,11 @@ class SxjmMultiFormatPipeline(NoticeMultiFormatPipeline):
         route = self._route(subtype)
         _, schema_type = self.ROUTES[subtype]
         normalized_type = normalize_notice_type(adapter.get("notice_type"))
-        is_termination = subtype.endswith(".zzgg")
+        is_termination = self._is_termination(
+            subtype,
+            dict(adapter.get("data") or {}),
+            str(adapter.get("title") or ""),
+        )
         if not is_termination and normalized_type != schema_type:
             raise ValueError(
                 f"公告子类型与Schema不一致：subtype={subtype} type={normalized_type}"
@@ -116,11 +127,12 @@ class SxjmMultiFormatPipeline(NoticeMultiFormatPipeline):
         record = self._build_record(adapter, schema_type)
         if self.include_meta and is_termination:
             record["公告类型"] = "TERMINATION"
+        json_record = self._build_json_record(adapter, schema_type, record)
 
         csv_writer = self._get_csv_writer(route)
         self._get_json_path(route)
         csv_row = {key: self._serialize_csv(value) for key, value in record.items()}
-        self._append_json_record(route, record)
+        self._append_json_record(route, json_record)
         csv_writer.writerow(csv_row)
         self._csv_files[route].flush()
 
@@ -140,4 +152,15 @@ class SxjmMultiFormatPipeline(NoticeMultiFormatPipeline):
             )
         self.crawler.stats.inc_value("export/appended_versions")
         self.crawler.stats.inc_value(f"export/sxjm/{subtype}")
+        progress_every = self.crawler.settings.getint("SXJM_PROGRESS_EVERY", 0)
+        saved = self.crawler.stats.get_value("export/appended_versions", 0)
+        if progress_every > 0 and saved % progress_every == 0:
+            self.crawler.spider.logger.info(
+                "[SXJM公告进度] 本次已保存=%s 公告ID=%s 栏目=%s 类型=%s 标题=%s",
+                saved,
+                adapter.get("notice_id") or "",
+                subtype,
+                record.get("公告类型") or "",
+                str(adapter.get("title") or "")[:100],
+            )
         return item

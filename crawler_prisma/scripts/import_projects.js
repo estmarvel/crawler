@@ -56,7 +56,7 @@ const FIELD_ALIASES = Object.freeze({
   qualityRequirement: ["质量要求"],
   supervisorDepartment: ["行政监督部门"],
   publishDate: ["发布日期"],
-  projectCode: ["项目编号/招标编号", "招标编号/项目编号", "项目编号"],
+  projectCode: ["项目编号", "项目编号/招标编号", "招标编号/项目编号"],
 });
 
 const SHANXI_PROVINCE = "山西省";
@@ -264,14 +264,15 @@ function extractLabelledCode(text, labels) {
 function extractNoticeIdentity(extraction) {
   const fields = extraction.extractedFields;
   const explicitProjectField = fieldValue(fields, ["项目编号"]);
+  const explicitTenderField = fieldValue(fields, ["招标编号"]);
   const combined = fieldValue(fields, ["项目编号/招标编号", "招标编号/项目编号"]);
   const parts = splitNumberParts(combined);
   const rawText = nullableString(extraction.rawNotice.rawText);
   const otherCodes = [];
   let projectCode = normalizeProjectCode(explicitProjectField);
-  let tenderCode = null;
+  let tenderCode = normalizeTenderCode(explicitTenderField);
   let projectCodeSource = projectCode ? "STRUCTURED_PROJECT_CODE" : null;
-  let tenderCodeSource = null;
+  let tenderCodeSource = tenderCode ? "STRUCTURED_TENDER_CODE" : null;
 
   if (parts.length > 0) {
     const eCodeIndex = parts.findIndex((part) => /^E\d{16,22}$/iu.test(normalizeProjectCode(part)));
@@ -287,11 +288,11 @@ function extractNoticeIdentity(extraction) {
       ? parts.findIndex((part) => normalizeProjectCode(part) === projectCode)
       : -1;
     const remaining = parts.filter((_, index) => index !== projectIndex);
-    if (remaining.length > 0) {
+    if (tenderCode === null && remaining.length > 0) {
       tenderCode = normalizeTenderCode(remaining[0]);
       tenderCodeSource = "STRUCTURED_NUMBER_FIELD";
       otherCodes.push(...remaining.slice(1).map(normalizeTenderCode).filter(Boolean));
-    } else if (projectCode === null && parts.length === 1) {
+    } else if (tenderCode === null && projectCode === null && parts.length === 1) {
       tenderCode = normalizeTenderCode(parts[0]);
       tenderCodeSource = "STRUCTURED_SINGLE_AMBIGUOUS_NUMBER";
     }

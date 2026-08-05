@@ -51,6 +51,11 @@ class HuaxinSpiderRequestTest(unittest.TestCase):
             [value.cb_kwargs.get("notice_id") for value in requests[:2]],
             ["old-1", "old-2"],
         )
+        list_trace = requests[0].cb_kwargs["list_record"]["_crawler_list_trace"]
+        self.assertEqual(list_trace["responseMetadata"]["requestKind"], "list_api")
+        self.assertEqual(list_trace["responseMetadata"]["response"]["status"], 200)
+        self.assertEqual(list_trace["businessEnvelope"]["total"], 4)
+        self.assertEqual(list_trace["requestPayload"]["pageNum"], 1)
         self.assertEqual(requests[-1].cb_kwargs.get("page"), 2)
 
     def test_explicit_history_window_is_parsed_and_validated(self):
@@ -244,7 +249,7 @@ class HuaxinSpiderRequestTest(unittest.TestCase):
         spider = HuaxinSpider(sections="zbjh")
         item = NoticeItem()
         item["attachments"] = []
-        item["data"] = {"附件": []}
+        item["data"] = {}
         item["file_urls"] = []
         attachments = [
             {
@@ -282,7 +287,8 @@ class HuaxinSpiderRequestTest(unittest.TestCase):
             result["file_urls"],
             ["https://files.example.test/preview/file-1"],
         )
-        self.assertEqual(result["data"]["附件"], result["attachments"])
+        self.assertIsNone(result["attachments"][0].get("file_hash"))
+        self.assertNotIn("附件", result["data"])
 
     def test_bid_plan_uses_plan_title_as_notice_title(self):
         spider = HuaxinSpider(sections="zbjh")
@@ -317,7 +323,7 @@ class HuaxinSpiderRequestTest(unittest.TestCase):
             notice_type="招标计划",
             notice_id="14",
             detail_url="https://www.ygcgpt.com/#/biddingplan?planid=14",
-            data={"附件": []},
+            data={},
             attachments=[
                 {
                     "source_file_id": "file-1",
@@ -367,7 +373,7 @@ class HuaxinSpiderRequestTest(unittest.TestCase):
         self.assertEqual(attachment["file_hash"], "a" * 32)
         self.assertEqual(attachment["file_size_bytes"], 1024)
         self.assertEqual(attachment["parse_status"], "DOWNLOADED_NO_OCR")
-        self.assertEqual(result["data"]["附件"], result["attachments"])
+        self.assertNotIn("附件", result["data"])
 
 
 if __name__ == "__main__":

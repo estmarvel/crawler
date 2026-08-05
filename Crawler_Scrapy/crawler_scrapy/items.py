@@ -24,6 +24,10 @@ class NoticeItem(scrapy.Item):
     missing_fields = scrapy.Field()
     field_meta = scrapy.Field()
     raw_data = scrapy.Field()
+    # 仅保存可公开、可复现请求的元数据；禁止写入 Cookie、Authorization 等凭据。
+    # JSON 导出器会将它与 raw_data/raw_html/raw_text 一起写入 `_trace`，供
+    # MongoDB raw_notices 溯源。现有业务字段和 CSV 表头不受影响。
+    response_metadata = scrapy.Field()
 
     # raw_html 推荐传 response.body，以尽量保留服务器返回的原始字节。
     # 若页面正文由 JSON 接口中的 HTML 字段提供，也可以传该 HTML 字符串。

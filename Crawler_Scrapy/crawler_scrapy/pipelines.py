@@ -44,6 +44,10 @@ from crawler_scrapy.storage.dedup import (
 )
 
 
+TRACE_FIELD = "_trace"
+TRACE_SCHEMA_VERSION = "1.0"
+
+
 def _safe_path_part(value: Any, fallback: str = "unknown", max_length: int = 100) -> str:
     """将网站代码、公告ID等转换为安全的目录名或文件名。"""
 
@@ -51,6 +55,26 @@ def _safe_path_part(value: Any, fallback: str = "unknown", max_length: int = 100
     text = re.sub(r"[\\/:*?\"<>|\x00-\x1f]", "_", text)
     text = re.sub(r"\s+", "_", text).strip("._ ")
     return (text or fallback)[:max_length]
+
+
+def _truncate_path_component(value: str, max_bytes: int = 240) -> str:
+    """按 UTF-8 字节安全截断单个路径组件，并保留扩展名和唯一性。"""
+
+    if len(value.encode("utf-8")) <= max_bytes:
+        return value
+    suffix = Path(value).suffix
+    marker = f"_{hashlib.sha256(value.encode('utf-8')).hexdigest()[:12]}"
+    reserved = len((marker + suffix).encode("utf-8"))
+    budget = max(1, max_bytes - reserved)
+    prefix: list[str] = []
+    used = 0
+    for character in value[: -len(suffix)] if suffix else value:
+        size = len(character.encode("utf-8"))
+        if used + size > budget:
+            break
+        prefix.append(character)
+        used += size
+    return f"{''.join(prefix).rstrip('._ ')}{marker}{suffix}"
 
 
 def _ensure_site_context(spider, output_root: Path) -> Path:
@@ -85,17 +109,62 @@ def _normalize_attachment_list(value: Any) -> list[dict[str, Any]]:
 def _to_json_compatible(value: Any) -> Any:
     """把数据库兼容的 Python 类型转换为 JSON 可以表示的值。"""
 
+    # 源站公告、附件等 ID 经常是 19 位整数。JSON 本身不限制整数精度，
+    # 但后续 Node.js 导入器只能精确表示到 2**53-1，因此在导出边界转为
+    # 字符串，确保原始响应、哈希校验和最终 MongoDB 溯源文档完全一致。
+    if isinstance(value, int) and not isinstance(value, bool):
+        if abs(value) > 9_007_199_254_740_991:
+            return str(value)
     if isinstance(value, Decimal):
         return float(value)
     if isinstance(value, datetime):
         return value.isoformat(sep=" ", timespec="milliseconds")
     if isinstance(value, date):
         return value.isoformat()
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        raw = bytes(value)
+        for encoding in ("utf-8-sig", "gb18030"):
+            try:
+                return raw.decode(encoding)
+            except UnicodeDecodeError:
+                continue
+        return raw.decode("utf-8", errors="replace")
     if isinstance(value, Mapping):
         return {key: _to_json_compatible(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
         return [_to_json_compatible(item) for item in value]
     return value
+
+
+def _raw_html_text(value: Any) -> str | None:
+    """把快照输入转换为 MongoDB rawHtml 可直接保存的文本。"""
+
+    if value in (None, ""):
+        return None
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        raw = bytes(value)
+        for encoding in ("utf-8-sig", "gb18030"):
+            try:
+                return raw.decode(encoding)
+            except UnicodeDecodeError:
+                continue
+        return raw.decode("utf-8", errors="replace")
+    return str(value)
+
+
+def _sha256_json(value: Any) -> str | None:
+    if value in (None, "", {}, []):
+        return None
+    payload = json.dumps(
+        _to_json_compatible(value),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
 
 
 class NoticeFilesPipeline(FilesPipeline):
@@ -112,6 +181,17 @@ class NoticeFilesPipeline(FilesPipeline):
         obj.enabled = crawler.settings.getbool(
             "NOTICE_ATTACHMENT_DOWNLOAD_ENABLED", False
         )
+        # 允许专用运行入口只放宽附件请求，而不必同时放宽列表和详情接口。
+        # 未配置时保持 Scrapy 原有 DOWNLOAD_TIMEOUT/RETRY_TIMES 行为，因此
+        # 现有独立脚本和其他 Spider 不受影响。
+        obj.attachment_download_timeout = crawler.settings.getfloat(
+            "NOTICE_ATTACHMENT_DOWNLOAD_TIMEOUT",
+            crawler.settings.getfloat("DOWNLOAD_TIMEOUT", 180.0),
+        )
+        obj.attachment_retry_times = crawler.settings.getint(
+            "NOTICE_ATTACHMENT_RETRY_TIMES",
+            crawler.settings.getint("RETRY_TIMES", 0),
+        )
         return obj
 
     def get_media_requests(self, item, info):
@@ -121,6 +201,16 @@ class NoticeFilesPipeline(FilesPipeline):
         referer = str(ItemAdapter(item).get("detail_url") or "").strip()
         for index, request in enumerate(requests):
             request.meta["_notice_attachment_index"] = index
+            attachment_timeout = getattr(
+                self, "attachment_download_timeout", None
+            )
+            attachment_retries = getattr(
+                self, "attachment_retry_times", None
+            )
+            if attachment_timeout is not None and attachment_timeout > 0:
+                request.meta["download_timeout"] = attachment_timeout
+            if attachment_retries is not None and attachment_retries >= 0:
+                request.meta["max_retry_times"] = attachment_retries
             # 华新文件接口会返回经过授权的站外 CDN 签名 URL。该 URL 已由详情
             # fileId 查询得到，不是页面中任意抓取的外链，因此允许媒体管道下载。
             request.meta["allow_offsite"] = True
@@ -161,9 +251,10 @@ class NoticeFilesPipeline(FilesPipeline):
         file_name = _safe_path_part(
             Path(file_name.replace("\\", "/")).name,
             "attachment.bin",
-            180,
+            10_000,
         )
-        return f"{platform}/attachments/{notice_type}/{notice_id}/{source_id}_{file_name}"
+        component = _truncate_path_component(f"{source_id}_{file_name}")
+        return f"{platform}/attachments/{notice_type}/{notice_id}/{component}"
 
     async def media_downloaded(self, response, request, info, *, item=None):
         result = await super().media_downloaded(
@@ -207,9 +298,6 @@ class NoticeFilesPipeline(FilesPipeline):
                 self.crawler.stats.inc_value("attachments/download_failed")
 
         adapter["attachments"] = attachments
-        data = dict(adapter.get("data") or {})
-        data["附件"] = attachments
-        adapter["data"] = data
         return item
 
 
@@ -299,9 +387,8 @@ class HtmlSnapshotPipeline:
     输出示例：
         output/<网站代码>/snapshots/03_招标公告/<公告ID>_<哈希>.html
 
-    CSV/JSON 不保存整段 HTML，只记录：
-        HTML快照路径
-        HTML快照SHA256
+    CSV 只记录快照路径和 SHA256；JSON `_trace.rawHtml` 另保留一份可独立
+    搬运的溯源包，Mongo 导入时会规范为唯一的 rawHtml 字段。
     """
 
     @classmethod
@@ -340,12 +427,9 @@ class HtmlSnapshotPipeline:
     def process_item(self, item):
         spider = self.crawler.spider
         adapter = ItemAdapter(item)
-        data = dict(adapter.get("data") or {})
-
         if not self.enabled:
-            data.setdefault("HTML快照路径", "")
-            data.setdefault("HTML快照SHA256", "")
-            adapter["data"] = data
+            adapter["snapshot_path"] = ""
+            adapter["snapshot_sha256"] = ""
             return item
 
         raw_bytes = self._to_bytes(adapter.get("raw_html"))
@@ -359,9 +443,8 @@ class HtmlSnapshotPipeline:
             if self.required:
                 raise DropItem(message)
             spider.logger.warning(message)
-            data["HTML快照路径"] = ""
-            data["HTML快照SHA256"] = ""
-            adapter["data"] = data
+            adapter["snapshot_path"] = ""
+            adapter["snapshot_sha256"] = ""
             return item
 
         notice_type = normalize_notice_type(adapter.get("notice_type"))
@@ -396,9 +479,6 @@ class HtmlSnapshotPipeline:
         relative_path = snapshot_path.relative_to(self.output_root).as_posix()
         adapter["snapshot_path"] = relative_path
         adapter["snapshot_sha256"] = digest
-        data["HTML快照路径"] = relative_path
-        data["HTML快照SHA256"] = digest
-        adapter["data"] = data
         return item
 
 
@@ -455,6 +535,38 @@ class NoticeSchemaPipeline:
             or normalized_data.get("公告正文")
             or ""
         ).strip()
+        # 八类结构都预设两个独立编号。站点解析器可以用 API 字段提供更可靠
+        # 的值；这里仅在字段仍为空时按正文中的明确标签补齐，不猜测组合字段
+        # 的语义，也不把同一个无标签编号复制到两个字段。
+        identifier_sources: dict[str, str] = {}
+        identifier_labels = {
+            "项目编号": (
+                "招标项目编号", "采购项目编号", "投资项目统一代码", "项目代码", "项目编号"
+            ),
+            "招标编号": ("招标编号", "采购编号"),
+        }
+        for identifier_field, labels in identifier_labels.items():
+            if normalized_data.get(identifier_field):
+                identifier_sources[identifier_field] = "site_parser"
+                continue
+            for label in labels:
+                match = re.search(
+                    rf"{re.escape(label)}\s*[：:]\s*"
+                    rf"([A-Za-z0-9][A-Za-z0-9._/-]{{2,190}})",
+                    raw_text,
+                )
+                if match:
+                    normalized_data[identifier_field] = match.group(1).strip("：:()（）")
+                    identifier_sources[identifier_field] = f"raw_text:{label}"
+                    break
+            else:
+                identifier_sources[identifier_field] = "missing"
+        field_meta = dict(adapter.get("field_meta") or {})
+        field_meta["identifierExtraction"] = {
+            "version": "notice-identifiers-v1",
+            "sources": identifier_sources,
+        }
+        adapter["field_meta"] = field_meta
         parse_status = str(
             adapter.get("parse_status")
             or normalized_data.get("解析状态")
@@ -488,22 +600,6 @@ class NoticeSchemaPipeline:
             }
         else:
             is_verified = bool(is_verified_value)
-
-        normalized_data["爬虫时间"] = crawl_time
-        normalized_data["详情页链接"] = detail_url
-        normalized_data["HTML快照路径"] = snapshot_path
-        normalized_data["HTML快照SHA256"] = snapshot_sha256
-        normalized_data["公告正文"] = raw_text
-        normalized_data["解析状态"] = parse_status
-        normalized_data["内容指纹"] = fingerprint
-        normalized_data["抽取方式"] = extraction_model
-        normalized_data["抽取版本"] = extraction_version
-        normalized_data["是否已核验"] = is_verified
-
-        if attachments:
-            normalized_data["附件"] = attachments
-        elif normalized_data.get("附件") in (None, ""):
-            normalized_data["附件"] = []
 
         adapter["notice_type"] = get_notice_type_code(notice_type_name)
         adapter["publish_time"] = publish_time
@@ -748,7 +844,6 @@ class AiHtmlExtractionPipeline:
                 else f"{previous_model}+{ai_marker}"
             )
             adapter["extraction_model"] = combined_model
-            normalized_data["抽取方式"] = combined_model
             self._inc_stat("ai/html/items_filled")
             self._inc_stat("ai/html/fields_filled", len(filled_fields))
         else:
@@ -796,8 +891,8 @@ class NoticeMultiFormatPipeline:
         ├── json/<公告类型>.json
         └── snapshots/<公告类型>/*.html
 
-    JSON 与 CSV 使用同一套完整字段。JSON 中列表、字典会保持原生结构；
-    CSV 中列表、字典会序列化为 JSON 字符串。
+    JSON 与 CSV 保持同一套主字段。JSON 额外带 `_trace` 溯源包；CSV 不加入
+    原始载荷和 HTML，避免改变既有表头及产生超大单元格。
 
     CSV 和 JSON 均以追加方式保存，不在 Spider 启动时清空。相同公告身份与
     内容指纹由 NoticeDedupPipeline 拦截；内容变化会追加为新版本。
@@ -823,6 +918,22 @@ class NoticeMultiFormatPipeline:
         "发布时间": "publish_time",
     }
 
+    # 这些字段是数据库/传输元数据，只在导出记录中追加一次；它们不属于
+    # ANNOUNCEMENT_SCHEMAS，也不会进入 Mongo notice_extractions.extractedFields。
+    STORAGE_ITEM_KEYS = {
+        "公告正文": "raw_text",
+        "解析状态": "parse_status",
+        "内容指纹": "fingerprint",
+        "抽取方式": "extraction_model",
+        "抽取版本": "extraction_version",
+        "是否已核验": "is_verified",
+        "爬虫时间": "crawl_time",
+        "详情页链接": "detail_url",
+        "HTML快照路径": "snapshot_path",
+        "HTML快照SHA256": "snapshot_sha256",
+        "附件": "attachments",
+    }
+
     @classmethod
     def from_crawler(cls, crawler):
         obj = cls(
@@ -839,6 +950,10 @@ class NoticeMultiFormatPipeline:
                 "NOTICE_EXPORT_EMPTY_FILES",
                 False,
             ),
+            include_trace=crawler.settings.getbool(
+                "NOTICE_EXPORT_TRACE",
+                True,
+            ),
         )
         obj.crawler = crawler
         return obj
@@ -849,11 +964,13 @@ class NoticeMultiFormatPipeline:
         include_meta: bool = True,
         include_diagnostics: bool = True,
         create_empty_files: bool = False,
+        include_trace: bool = True,
     ):
         self.output_root = output_root
         self.include_meta = include_meta
         self.include_diagnostics = include_diagnostics
         self.create_empty_files = create_empty_files
+        self.include_trace = include_trace
         self.site_dir: Path | None = None
         self.csv_dir: Path | None = None
         self.json_dir: Path | None = None
@@ -1018,19 +1135,89 @@ class NoticeMultiFormatPipeline:
         data = adapter.get("data") or {}
         for field in get_notice_fields(notice_type):
             value = data.get(field, "")
-            if field == "附件" and value in (None, ""):
-                value = []
             record[field] = value
 
         if self.include_diagnostics:
             record["缺失字段"] = adapter.get("missing_fields") or []
 
+        for field, item_key in self.STORAGE_ITEM_KEYS.items():
+            value = adapter.get(item_key)
+            if field == "附件" and value in (None, ""):
+                value = []
+            record[field] = value
+
         return record
+
+    def _build_trace(self, adapter: ItemAdapter) -> dict[str, Any]:
+        """构造与 MongoDB raw_notices 字段一一对应的溯源包。"""
+
+        raw_data = adapter.get("raw_data")
+        payload = raw_data if isinstance(raw_data, Mapping) else {
+            "value": raw_data,
+        } if raw_data is not None else {
+            "sourceNoticeId": str(adapter.get("notice_id") or ""),
+            "sourceUrl": str(adapter.get("detail_url") or ""),
+        }
+        raw_html = _raw_html_text(adapter.get("raw_html"))
+        raw_text = str(adapter.get("raw_text") or "") or None
+        field_meta = dict(adapter.get("field_meta") or {})
+        extraction_version = str(adapter.get("extraction_version") or "") or None
+        return {
+            "schemaVersion": TRACE_SCHEMA_VERSION,
+            "noticeSchemaVersion": NOTICE_SCHEMA_VERSION,
+            "payload": payload,
+            "rawHtml": raw_html,
+            "rawText": raw_text,
+            "responseMetadata": dict(adapter.get("response_metadata") or {}),
+            "crawlerVersion": extraction_version,
+            "extractionModel": str(adapter.get("extraction_model") or "") or None,
+            "extractionVersion": extraction_version,
+            "fieldMeta": field_meta,
+            "capturedAt": adapter.get("crawl_time"),
+            # 这些值在 MySQL/MongoDB 中大多有正式字段；同时保留一份导出时
+            # 视图，覆盖 notice_subtype、缺失字段和本地快照信息等诊断字段。
+            "exportMetadata": {
+                "platformName": str(adapter.get("platform") or "") or None,
+                "platformCode": str(adapter.get("platform_code") or "") or None,
+                "sourceNoticeId": str(adapter.get("notice_id") or "") or None,
+                "noticeType": str(adapter.get("notice_type") or "") or None,
+                "noticeSubtype": str(adapter.get("notice_subtype") or "") or None,
+                "title": str(adapter.get("title") or "") or None,
+                "publishTime": adapter.get("publish_time"),
+                "detailUrl": str(adapter.get("detail_url") or "") or None,
+                "parseStatus": str(adapter.get("parse_status") or "") or None,
+                "isVerified": bool(adapter.get("is_verified")),
+                "missingFields": list(adapter.get("missing_fields") or []),
+                "snapshotPath": str(adapter.get("snapshot_path") or "") or None,
+                "snapshotSha256": str(adapter.get("snapshot_sha256") or "") or None,
+                "attachments": list(adapter.get("attachments") or []),
+            },
+            "integrity": {
+                "contentFingerprint": str(adapter.get("fingerprint") or "") or None,
+                "payloadSha256": _sha256_json(payload),
+                "rawHtmlSha256": hashlib.sha256(raw_html.encode("utf-8")).hexdigest()
+                if raw_html else None,
+                "rawTextSha256": hashlib.sha256(raw_text.encode("utf-8")).hexdigest()
+                if raw_text else None,
+            },
+        }
+
+    def _build_json_record(
+        self,
+        adapter: ItemAdapter,
+        notice_type: str,
+        record: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        result = dict(record or self._build_record(adapter, notice_type))
+        if self.include_trace:
+            result[TRACE_FIELD] = self._build_trace(adapter)
+        return result
 
     def process_item(self, item):
         adapter = ItemAdapter(item)
         notice_type = normalize_notice_type(adapter.get("notice_type"))
         record = self._build_record(adapter, notice_type)
+        json_record = self._build_json_record(adapter, notice_type, record)
 
         csv_writer = self._get_csv_writer(notice_type)
         self._get_json_path(notice_type)
@@ -1045,7 +1232,7 @@ class NoticeMultiFormatPipeline:
         )
 
         try:
-            self._append_json_record(notice_type, record)
+            self._append_json_record(notice_type, json_record)
             csv_writer.writerow(csv_row)
             self._csv_files[notice_type].flush()
             if store is not None and dedup:

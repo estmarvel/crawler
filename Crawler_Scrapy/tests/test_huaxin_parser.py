@@ -346,6 +346,38 @@ class HuaxinParserTest(unittest.TestCase):
             ],
         )
 
+    def test_ranked_inline_price_with_parenthetical_qualifier_is_not_part_of_name(self):
+        detail = {
+            "annId": "candidate-qualified-price-label",
+            "annClassification": "2",
+            "annTitle": "燃气报警装置供应商入围框架协议中标候选人公示",
+            "reviewSituation": """
+                <p>一、评标情况</p>
+                <p>001第一标段</p>
+                <p>第1名：成都鑫豪斯电子探测技术有限公司,投标报价（各分项单价合计值）：211元,项目负责人：杨帆,该投标人的资格能力条件满足招标文件相关要求。</p>
+                <p>第2名：金卡智能集团股份有限公司,投标报价(各分项单价合计值)：175元,项目负责人：张思赐。</p>
+                <p>二、提出异议的渠道和方式</p>
+            """,
+        }
+
+        _, _, data, _ = HuaxinParser.parse("hxr", detail)
+
+        self.assertEqual(
+            data["中标候选人名称"],
+            [
+                "001第一标段：成都鑫豪斯电子探测技术有限公司",
+                "001第一标段：金卡智能集团股份有限公司",
+            ],
+        )
+        self.assertEqual(
+            data["中标候选人报价"],
+            [Decimal("211.00"), Decimal("175.00")],
+        )
+        self.assertEqual(
+            [item["候选人报价"] for item in data["中标候选人明细"]],
+            data["中标候选人报价"],
+        )
+
     def test_vertical_candidate_table_is_paired_with_header_unit(self):
         detail = {
             "annId": "candidate-vertical-table",
@@ -480,6 +512,19 @@ class HuaxinParserTest(unittest.TestCase):
         self.assertEqual(combined.count("第1名：甲公司"), 1)
         self.assertEqual(combined.count("招标人：测试单位"), 1)
 
+    def test_structured_intro_with_spacing_difference_is_not_appended_again(self):
+        detail = {
+            "annContent2": """
+                <p>本项目（招标项目编号：E1）经评审，确定001不分标段的中标结果，现公示如下：</p>
+                <p>一、中标人信息</p><p>中标人：测试公司</p>
+            """,
+            "bidCondition": "本项目(招标项目编号:E1)经评审，确定001 不分标段的中标结果，现公示如下：",
+        }
+
+        combined = _combine_text(detail)
+
+        self.assertEqual(combined.count("本项目"), 1)
+
     def test_spaced_and_numbered_tender_labels_are_extracted(self):
         detail = {
             "annClassification": "1",
@@ -558,6 +603,8 @@ class HuaxinParserTest(unittest.TestCase):
             data["项目编号/招标编号"],
             "E1401005107101357001；ZDF03-HZ260502",
         )
+        self.assertEqual(data["项目编号"], "E1401005107101357001")
+        self.assertEqual(data["招标编号"], "ZDF03-HZ260502")
 
     def test_project_number_does_not_consume_next_subsection_number(self):
         detail = {
@@ -572,6 +619,8 @@ class HuaxinParserTest(unittest.TestCase):
         _, _, data, _ = HuaxinParser.parse("zbgg_zys", detail)
 
         self.assertEqual(data["项目编号/招标编号"], "HXZB-GC20260613")
+        self.assertEqual(data["项目编号"], "")
+        self.assertEqual(data["招标编号"], "HXZB-GC20260613")
 
     def test_result_detection_prefers_title_semantics(self):
         correction = {
@@ -656,7 +705,9 @@ class HuaxinParserTest(unittest.TestCase):
             "supervisionUnitName": "测试监督部门",
         }
         _, notice_type, data, _ = HuaxinParser.parse("gs", detail)
-        normalized = canonicalize_notice_data(notice_type, data)
+        normalized = canonicalize_notice_data(
+            notice_type, data, include_parser_diagnostics=True
+        )
         self.assertEqual(normalized["中标人名称"], ["测试中标人"])
         # 数据库 bid_amount 无法表示百分比，类型对齐阶段保留源站原文。
         self.assertEqual(normalized["中标价"], ["68%"])
@@ -708,7 +759,9 @@ class HuaxinParserTest(unittest.TestCase):
             ],
         }
         _, notice_type, data, _ = HuaxinParser.parse("gs", detail)
-        normalized = canonicalize_notice_data(notice_type, data)
+        normalized = canonicalize_notice_data(
+            notice_type, data, include_parser_diagnostics=True
+        )
         self.assertEqual(normalized["中标人名称"], ["甲公司", "乙公司"])
         self.assertEqual(normalized["中标价"], [None, Decimal("1200000.00")])
         self.assertEqual(
@@ -756,7 +809,7 @@ class HuaxinParserTest(unittest.TestCase):
         _, _, data, attachments = HuaxinParser.parse("zbgg_zys", detail)
         self.assertEqual(attachments[0]["source_file_id"], "internal-file-id")
         self.assertIsNone(attachments[0]["file_name"])
-        self.assertEqual(data["附件"], attachments)
+        self.assertNotIn("附件", data)
 
     def test_pdf_file_is_only_archived_for_pdf_only_detail(self):
         html_notice = {
@@ -786,9 +839,72 @@ class HuaxinParserTest(unittest.TestCase):
         data = create_empty_notice_data("招标公告")
         self.assertIsNone(data["开标时间"])
         self.assertIsNone(data["项目总投资/估算金额"])
-        self.assertEqual(data["附件"], [])
+        self.assertNotIn("附件", data)
         self.assertEqual(get_notice_type_code("招标公告"), "TENDER")
         self.assertEqual(get_notice_type_code("TENDER"), "TENDER")
+
+    def test_full_text_variants_fill_duration_quality_scope_and_control_price(self):
+        detail = {
+            "annId": "full-text-variants",
+            "annClassification": "1",
+            "annTitle": "完整正文规则测试招标公告",
+            "annContent": """
+                <p>二、项目概况与招标范围</p>
+                <p>2.1项目概况：测试项目；合同履行期限：合同签订后3年；交货地点：指定地点；服务质量要求：符合国家标准。</p>
+                <p>2.2招标范围：工程量清单范围内的全部内容。</p>
+                <p>2.3招标控制价：9692569.81元；投标报价不得超过控制价。</p>
+                <p>3、投标人资格要求</p>
+                <p>具有独立法人资格。</p>
+            """,
+        }
+
+        _, _, data, _ = HuaxinParser.parse("zbgg_zys", detail)
+
+        self.assertEqual(data["工期/服务期/供货日期"], "合同签订后3年")
+        self.assertEqual(data["质量要求"], "符合国家标准。")
+        self.assertEqual(data["招标内容与范围"], "工程量清单范围内的全部内容。")
+        self.assertEqual(data["招标金额"], Decimal("9692569.81"))
+
+    def test_multisection_delivery_period_keeps_all_sections(self):
+        detail = {
+            "annId": "multi-section-duration",
+            "annClassification": "1",
+            "annTitle": "多标段设备采购招标公告",
+            "annContent": """
+                <p>2.4交货期：</p>
+                <p>第一标段：合同签订后30日历天内。</p>
+                <p>第二标段：合同签订后60日历天内。</p>
+                <p>2.5交货地点：招标人指定地点。</p>
+                <p>3、投标人资格要求</p>
+            """,
+        }
+
+        _, _, data, _ = HuaxinParser.parse("zbgg_zys", detail)
+
+        self.assertIn("第一标段：合同签订后30日历天内。", data["工期/服务期/供货日期"])
+        self.assertIn("第二标段：合同签订后60日历天内。", data["工期/服务期/供货日期"])
+
+    def test_award_full_text_fills_duration_manager_and_certificate(self):
+        detail = {
+            "annId": "award-full-text",
+            "annClassification": "3",
+            "annTitle": "监理项目中标结果公示",
+            "annContent": """
+                <p>中标人：测试监理有限公司；中标价：123456元。</p>
+                <p>工期：96天；质量：合格；项目负责人：宋少龙；</p>
+                <p>证书名称及编号：注册监理工程师（房屋建筑工程专业）、14008291。</p>
+            """,
+        }
+
+        _, _, data, _ = HuaxinParser.parse("gs", detail)
+
+        self.assertEqual(data["工期"], "96天")
+        self.assertEqual(data["项目经理"], "宋少龙")
+        self.assertEqual(
+            data["项目经理证书名称"],
+            "注册监理工程师（房屋建筑工程专业）",
+        )
+        self.assertEqual(data["项目经理证书编号"], "14008291")
 
 
 if __name__ == "__main__":
