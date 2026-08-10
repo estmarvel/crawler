@@ -1,5 +1,6 @@
 generator client {
-  provider = "prisma-client-js"
+  provider      = "prisma-client-js"
+  binaryTargets = ["native"]
 }
 
 datasource db {
@@ -15,35 +16,89 @@ enum FavoriteStatus {
   abandoned
 }
 
+enum ProfileSourceType {
+  MYSQL
+  MONGODB_API
+  USER_INPUT
+  DERIVED
+}
+
+enum ProfileValueStatus {
+  AVAILABLE
+  MISSING
+  EXPIRED
+  CONFLICTED
+  UNVERIFIED
+}
+
+enum ProfileMissingReason {
+  NOT_COLLECTED
+  SOURCE_EMPTY
+  DEPENDENCY_MISSING
+  USER_NOT_PROVIDED
+  NOT_APPLICABLE
+}
+
+enum ProfileVerificationStatus {
+  SYSTEM_VERIFIED
+  USER_CONFIRMED
+  UNVERIFIED
+}
+
+enum ProfileReviewStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  CANCELLED
+}
+
+enum CapabilitySupportStatus {
+  SUPPORTED
+  INSUFFICIENT_DATA
+  CONFLICTED
+}
+
 model Company {
-  id                            Int                      @id @default(autoincrement())
-  companyName                   String                   @map("company_name")
-  creditCode                    String?                  @unique @map("credit_code")
+  id                            Int                                @id @default(autoincrement())
+  companyName                   String                             @map("company_name")
+  creditCode                    String?                            @unique @map("credit_code")
   province                      String?
   city                          String?
-  companyType                   String?                  @map("company_type")
-  qualificationLevel            String?                  @map("qualification_level")
-  businessScope                 String?                  @map("business_scope") @db.Text
-  registeredCapital             Decimal?                 @map("registered_capital") @db.Decimal(18, 2)
-  establishedDate               DateTime?                @map("established_date") @db.Date
-  legalPerson                   String?                  @map("legal_person") @db.VarChar(64)
-  employeeCount                 Int?                     @map("employee_count")
-  createdAt                     DateTime                 @default(now()) @map("created_at")
-  updatedAt                     DateTime                 @updatedAt @map("updated_at")
+  companyType                   String?                            @map("company_type")
+  qualificationLevel            String?                            @map("qualification_level")
+  businessScope                 String?                            @map("business_scope") @db.Text
+  registeredCapital             Decimal?                           @map("registered_capital") @db.Decimal(18, 2)
+  establishedDate               DateTime?                          @map("established_date") @db.Date
+  legalPerson                   String?                            @map("legal_person") @db.VarChar(64)
+  employeeCount                 Int?                               @map("employee_count")
+  createdAt                     DateTime                           @default(now()) @map("created_at")
+  updatedAt                     DateTime                           @updatedAt @map("updated_at")
   aliases                       CompanyAlias[]
-  ownedProjects                 Project[]                @relation("ProjectOwner")
+  ownedProjects                 Project[]                          @relation("ProjectOwner")
   relations                     ProjectCompanyRelation[]
   profileSnapshots              CompanyProfileSnapshot[]
   qualifications                CompanyQualification[]
   personnel                     CompanyPersonnel[]
+  profileUserFacts              CompanyProfileUserFact[]
+  profileCorrections            CompanyProfileCorrection[]
+  profileFieldValues            CompanyProfileFieldValue[]
+  capabilityAssessments         CompanyCapabilityAssessment[]
+  profileTags                   CompanyProfileTag[]
+  profileEvidenceAttachments    CompanyProfileEvidenceAttachment[]
+  profileReviewEvents           CompanyProfileReviewEvent[]
+  intellectualProperties        CompanyIntellectualProperty[]
+  riskFacts                     CompanyRiskFact[]
+  businessRelations             CompanyBusinessRelation[]
+  projectionReferences          CompanyDataProjectionReference[]
   recommendationResults         RecommendationResult[]
   userFeedbacks                 UserFeedback[]
-  targetCompetitionAnalyses     CompetitionAnalysis[]    @relation("CompetitionTargetCompany")
-  competitorCompetitionAnalyses CompetitionAnalysis[]    @relation("CompetitionCompetitorCompany")
+  targetCompetitionAnalyses     CompetitionAnalysis[]              @relation("CompetitionTargetCompany")
+  competitorCompetitionAnalyses CompetitionAnalysis[]              @relation("CompetitionCompetitorCompany")
   winProbabilityAnalyses        WinProbabilityAnalysis[]
-  contracts                     Contract[]               @relation("ContractSellerCompany")
+  contracts                     Contract[]                         @relation("ContractSellerCompany")
 
   @@index([companyName])
+  @@fulltext([companyName], map: "company_company_name_ft")
   @@map("company")
 }
 
@@ -100,6 +155,8 @@ model Project {
   @@index([projectCode])
   @@index([projectName])
   @@index([currentStatus, province, city, industry])
+  @@index([ownerCompanyId], map: "project_owner_company_id_fkey")
+  @@fulltext([projectName], map: "project_project_name_ft")
   @@map("project")
 }
 
@@ -147,24 +204,31 @@ model ProjectNotice {
   @@index([publishDate])
   @@index([sourceNoticeId])
   @@index([noticeType, publishDate])
+  @@fulltext([content], map: "project_notice_content_ft")
+  @@fulltext([title], map: "project_notice_title_ft")
   @@map("project_notice")
 }
 
 model ProjectNoticeAttachment {
-  id            Int           @id @default(autoincrement())
-  noticeId      Int           @map("notice_id")
-  fileName      String        @map("file_name")
-  fileUrl       String?       @map("file_url") @db.VarChar(1024)
-  fileType      String?       @map("file_type")
-  storagePath   String?       @map("storage_path") @db.VarChar(1024)
-  fileHash      String?       @map("file_hash") @db.VarChar(64)
-  fileSizeBytes BigInt?       @map("file_size_bytes")
-  parseStatus   String        @default("PENDING") @map("parse_status") @db.VarChar(32)
-  createdAt     DateTime      @default(now()) @map("created_at")
-  notice        ProjectNotice @relation(fields: [noticeId], references: [id])
+  id                   Int           @id @default(autoincrement())
+  uid                  String        @unique @default(uuid()) @db.Char(36)
+  noticeId             Int           @map("notice_id")
+  fileName             String        @map("file_name")
+  fileUrl              String?       @map("file_url") @db.VarChar(1024)
+  fileType             String?       @map("file_type")
+  storageProvider      String        @default("MINIO") @map("storage_provider") @db.VarChar(16)
+  bucketName           String?       @map("bucket_name") @db.VarChar(63)
+  objectKey            String?       @map("object_key") @db.VarChar(700)
+  fileHash             String?       @map("file_hash") @db.VarChar(64)
+  fileSizeBytes        BigInt?       @map("file_size_bytes")
+  parseStatus          String        @default("PENDING") @map("parse_status") @db.VarChar(32)
+  mongoParseDocumentId String?       @map("mongo_parse_document_id") @db.Char(24)
+  createdAt            DateTime      @default(now()) @map("created_at")
+  notice               ProjectNotice @relation(fields: [noticeId], references: [id])
 
   @@index([noticeId])
   @@index([fileHash])
+  @@index([bucketName, objectKey])
   @@map("project_notice_attachment")
 }
 
@@ -239,6 +303,306 @@ model CompanyProfileSnapshot {
 
   @@unique([companyId, snapshotDate])
   @@map("company_profile_snapshot")
+}
+
+model ProfileFieldDefinition {
+  id               Int                        @id @default(autoincrement())
+  fieldCode        String                     @unique @map("field_code") @db.VarChar(128)
+  fieldGroup       String                     @map("field_group") @db.VarChar(64)
+  fieldLabel       String                     @map("field_label") @db.VarChar(128)
+  description      String?                    @db.Text
+  dimensionCode    String?                    @map("dimension_code") @db.VarChar(64)
+  valueType        String                     @map("value_type") @db.VarChar(32)
+  required         Boolean                    @default(false)
+  allowMultiple    Boolean                    @default(false) @map("allow_multiple")
+  userEditable     Boolean                    @default(false) @map("user_editable")
+  correctionOnly   Boolean                    @default(false) @map("correction_only")
+  evidenceRequired Boolean                    @default(false) @map("evidence_required")
+  expiryDays       Int?                       @map("expiry_days")
+  sourcePriority   Json                       @map("source_priority")
+  missingRule      Json?                      @map("missing_rule")
+  options          Json?
+  isEnabled        Boolean                    @default(true) @map("is_enabled")
+  sortOrder        Int                        @default(0) @map("sort_order")
+  createdAt        DateTime                   @default(now()) @map("created_at")
+  updatedAt        DateTime                   @updatedAt @map("updated_at")
+  userFacts        CompanyProfileUserFact[]
+  corrections      CompanyProfileCorrection[]
+  fieldValues      CompanyProfileFieldValue[]
+
+  @@index([fieldGroup, isEnabled, sortOrder])
+  @@map("profile_field_definition")
+}
+
+model CompanyProfileUserFact {
+  id                  Int                                @id @default(autoincrement())
+  companyId           Int                                @map("company_id")
+  fieldCode           String                             @map("field_code") @db.VarChar(128)
+  valueJson           Json                               @map("value_json")
+  evidenceJson        Json?                              @map("evidence_json")
+  sourceType          ProfileSourceType                  @default(USER_INPUT) @map("source_type")
+  verificationStatus  ProfileVerificationStatus          @default(UNVERIFIED) @map("verification_status")
+  reviewStatus        ProfileReviewStatus                @default(PENDING) @map("review_status")
+  validFrom           DateTime?                          @map("valid_from")
+  validUntil          DateTime?                          @map("valid_until")
+  submittedBy         Int?                               @map("submitted_by")
+  reviewedBy          Int?                               @map("reviewed_by")
+  reviewedAt          DateTime?                          @map("reviewed_at")
+  reviewComment       String?                            @map("review_comment") @db.Text
+  isCurrent           Boolean                            @default(true) @map("is_current")
+  createdAt           DateTime                           @default(now()) @map("created_at")
+  updatedAt           DateTime                           @updatedAt @map("updated_at")
+  company             Company                            @relation(fields: [companyId], references: [id])
+  fieldDefinition     ProfileFieldDefinition             @relation(fields: [fieldCode], references: [fieldCode])
+  evidenceAttachments CompanyProfileEvidenceAttachment[]
+  reviewEvents        CompanyProfileReviewEvent[]
+
+  @@index([companyId, fieldCode, isCurrent])
+  @@index([reviewStatus, createdAt])
+  @@index([verificationStatus, validUntil])
+  @@index([fieldCode], map: "company_profile_user_fact_field_code_fkey")
+  @@map("company_profile_user_fact")
+}
+
+model CompanyProfileCorrection {
+  id                  Int                                @id @default(autoincrement())
+  companyId           Int                                @map("company_id")
+  fieldCode           String                             @map("field_code") @db.VarChar(128)
+  originalValue       Json?                              @map("original_value")
+  proposedValue       Json                               @map("proposed_value")
+  evidenceJson        Json?                              @map("evidence_json")
+  reason              String?                            @db.Text
+  status              ProfileReviewStatus                @default(PENDING)
+  submittedBy         Int?                               @map("submitted_by")
+  reviewedBy          Int?                               @map("reviewed_by")
+  reviewComment       String?                            @map("review_comment") @db.Text
+  reviewedAt          DateTime?                          @map("reviewed_at")
+  createdAt           DateTime                           @default(now()) @map("created_at")
+  updatedAt           DateTime                           @updatedAt @map("updated_at")
+  company             Company                            @relation(fields: [companyId], references: [id])
+  fieldDefinition     ProfileFieldDefinition             @relation(fields: [fieldCode], references: [fieldCode])
+  evidenceAttachments CompanyProfileEvidenceAttachment[]
+  reviewEvents        CompanyProfileReviewEvent[]
+
+  @@index([companyId, fieldCode])
+  @@index([status, createdAt])
+  @@index([fieldCode], map: "company_profile_correction_field_code_fkey")
+  @@map("company_profile_correction")
+}
+
+model CompanyIntellectualProperty {
+  id                 Int                       @id @default(autoincrement())
+  companyId          Int                       @map("company_id")
+  propertyType       String                    @map("property_type") @db.VarChar(32)
+  propertyName       String                    @map("property_name") @db.VarChar(512)
+  registrationNo     String?                   @map("registration_no") @db.VarChar(191)
+  applicationNo      String?                   @map("application_no") @db.VarChar(191)
+  status             String?                   @db.VarChar(32)
+  issueDate          DateTime?                 @map("issue_date") @db.Date
+  expiryDate         DateTime?                 @map("expiry_date") @db.Date
+  sourceType         ProfileSourceType         @map("source_type")
+  sourceRecordId     String                    @map("source_record_id") @db.VarChar(191)
+  snapshotUid        String?                   @map("snapshot_uid") @db.Char(64)
+  evidenceJson       Json?                     @map("evidence_json")
+  verificationStatus ProfileVerificationStatus @default(UNVERIFIED) @map("verification_status")
+  createdAt          DateTime                  @default(now()) @map("created_at")
+  updatedAt          DateTime                  @updatedAt @map("updated_at")
+  company            Company                   @relation(fields: [companyId], references: [id])
+
+  @@unique([companyId, propertyType, sourceRecordId], map: "company_ip_source_identity")
+  @@index([companyId, propertyType, status], map: "company_ip_lookup_idx")
+  @@index([snapshotUid])
+  @@map("company_intellectual_property")
+}
+
+model CompanyRiskFact {
+  id                 Int                       @id @default(autoincrement())
+  companyId          Int                       @map("company_id")
+  riskType           String                    @map("risk_type") @db.VarChar(64)
+  title              String?                   @db.VarChar(512)
+  status             String?                   @db.VarChar(32)
+  severity           String?                   @db.VarChar(32)
+  occurredAt         DateTime?                 @map("occurred_at")
+  resolvedAt         DateTime?                 @map("resolved_at")
+  amount             Decimal?                  @db.Decimal(18, 2)
+  sourceType         ProfileSourceType         @map("source_type")
+  sourceRecordId     String                    @map("source_record_id") @db.VarChar(191)
+  snapshotUid        String?                   @map("snapshot_uid") @db.Char(64)
+  evidenceJson       Json?                     @map("evidence_json")
+  verificationStatus ProfileVerificationStatus @default(UNVERIFIED) @map("verification_status")
+  createdAt          DateTime                  @default(now()) @map("created_at")
+  updatedAt          DateTime                  @updatedAt @map("updated_at")
+  company            Company                   @relation(fields: [companyId], references: [id])
+
+  @@unique([companyId, riskType, sourceRecordId], map: "company_risk_source_identity")
+  @@index([companyId, riskType, status])
+  @@index([snapshotUid])
+  @@map("company_risk_fact")
+}
+
+model CompanyBusinessRelation {
+  id                 Int                       @id @default(autoincrement())
+  companyId          Int                       @map("company_id")
+  relatedCompanyName String                    @map("related_company_name") @db.VarChar(200)
+  relationType       String                    @map("relation_type") @db.VarChar(32)
+  relationshipDate   DateTime?                 @map("relationship_date") @db.Date
+  amount             Decimal?                  @db.Decimal(18, 2)
+  projectName        String?                   @map("project_name") @db.VarChar(512)
+  sourceType         ProfileSourceType         @map("source_type")
+  sourceRecordId     String                    @map("source_record_id") @db.VarChar(191)
+  snapshotUid        String?                   @map("snapshot_uid") @db.Char(64)
+  evidenceJson       Json?                     @map("evidence_json")
+  verificationStatus ProfileVerificationStatus @default(UNVERIFIED) @map("verification_status")
+  createdAt          DateTime                  @default(now()) @map("created_at")
+  updatedAt          DateTime                  @updatedAt @map("updated_at")
+  company            Company                   @relation(fields: [companyId], references: [id])
+
+  @@unique([companyId, relationType, sourceRecordId], map: "company_business_relation_source_identity")
+  @@index([companyId, relationType, relationshipDate], map: "company_business_relation_lookup_idx")
+  @@index([snapshotUid])
+  @@map("company_business_relation")
+}
+
+model CompanyDataProjectionReference {
+  id                 Int                       @id @default(autoincrement())
+  companyId          Int?                      @map("company_id")
+  entityType         String                    @map("entity_type") @db.VarChar(64)
+  entityId           Int                       @map("entity_id")
+  sourceType         ProfileSourceType         @map("source_type")
+  snapshotUid        String                    @map("snapshot_uid") @db.Char(64)
+  apiCode            String                    @map("api_code") @db.VarChar(32)
+  sourceRecordId     String                    @map("source_record_id") @db.VarChar(191)
+  sourceUrl          String?                   @map("source_url") @db.VarChar(1024)
+  verificationStatus ProfileVerificationStatus @default(UNVERIFIED) @map("verification_status")
+  projectedAt        DateTime                  @default(now()) @map("projected_at")
+  company            Company?                  @relation(fields: [companyId], references: [id])
+
+  @@unique([entityType, snapshotUid, apiCode, sourceRecordId], map: "company_projection_source_identity")
+  @@index([entityType, entityId])
+  @@index([companyId, sourceType])
+  @@index([snapshotUid, apiCode])
+  @@map("company_data_projection_reference")
+}
+
+model CompanyProfileFieldValue {
+  id                 Int                       @id @default(autoincrement())
+  companyId          Int                       @map("company_id")
+  fieldCode          String                    @map("field_code") @db.VarChar(128)
+  valueJson          Json?                     @map("value_json")
+  sourceType         ProfileSourceType         @map("source_type")
+  sourceName         String?                   @map("source_name") @db.VarChar(200)
+  sourceRef          String                    @map("source_ref") @db.VarChar(191)
+  snapshotUid        String?                   @map("snapshot_uid") @db.Char(64)
+  collectedAt        DateTime?                 @map("collected_at")
+  expiresAt          DateTime?                 @map("expires_at")
+  status             ProfileValueStatus
+  missingReason      ProfileMissingReason?     @map("missing_reason")
+  verificationStatus ProfileVerificationStatus @default(UNVERIFIED) @map("verification_status")
+  sourcePriority     Int                       @default(100) @map("source_priority")
+  isCurrent          Boolean                   @default(true) @map("is_current")
+  createdAt          DateTime                  @default(now()) @map("created_at")
+  updatedAt          DateTime                  @updatedAt @map("updated_at")
+  company            Company                   @relation(fields: [companyId], references: [id])
+  fieldDefinition    ProfileFieldDefinition    @relation(fields: [fieldCode], references: [fieldCode])
+
+  @@unique([companyId, fieldCode, sourceType, sourceRef], map: "company_profile_field_value_source_identity")
+  @@index([companyId, fieldCode, isCurrent], map: "company_profile_field_value_company_field_current_idx")
+  @@index([companyId, status, isCurrent], map: "company_profile_field_value_company_status_current_idx")
+  @@index([snapshotUid])
+  @@index([fieldCode], map: "company_profile_field_value_field_code_fkey")
+  @@map("company_profile_field_value")
+}
+
+model CompanyCapabilityAssessment {
+  id               Int                     @id @default(autoincrement())
+  assessmentUid    String                  @unique @default(uuid()) @map("assessment_uid") @db.Char(36)
+  companyId        Int                     @map("company_id")
+  dimensionCode    String                  @map("dimension_code") @db.VarChar(64)
+  supportStatus    CapabilitySupportStatus @map("support_status")
+  summary          String?                 @db.Text
+  claimsJson       Json?                   @map("claims_json")
+  evidenceJson     Json?                   @map("evidence_json")
+  unknownsJson     Json?                   @map("unknowns_json")
+  snapshotUid      String?                 @map("snapshot_uid") @db.Char(64)
+  algorithmVersion String                  @map("algorithm_version") @db.VarChar(64)
+  calculatedAt     DateTime                @default(now()) @map("calculated_at")
+  isCurrent        Boolean                 @default(true) @map("is_current")
+  createdAt        DateTime                @default(now()) @map("created_at")
+  updatedAt        DateTime                @updatedAt @map("updated_at")
+  company          Company                 @relation(fields: [companyId], references: [id])
+
+  @@index([companyId, dimensionCode, isCurrent], map: "company_capability_current_idx")
+  @@index([snapshotUid, algorithmVersion], map: "company_capability_assessment_snapshot_algorithm_idx")
+  @@map("company_capability_assessment")
+}
+
+model CompanyProfileTag {
+  id                 Int                       @id @default(autoincrement())
+  companyId          Int                       @map("company_id")
+  tagType            String                    @map("tag_type") @db.VarChar(32)
+  tagValue           String                    @map("tag_value") @db.VarChar(200)
+  normalizedValue    String                    @map("normalized_value") @db.VarChar(200)
+  sourceType         ProfileSourceType         @map("source_type")
+  sourceRef          String                    @map("source_ref") @db.VarChar(191)
+  snapshotUid        String?                   @map("snapshot_uid") @db.Char(64)
+  evidenceJson       Json?                     @map("evidence_json")
+  verificationStatus ProfileVerificationStatus @default(UNVERIFIED) @map("verification_status")
+  isCurrent          Boolean                   @default(true) @map("is_current")
+  createdAt          DateTime                  @default(now()) @map("created_at")
+  updatedAt          DateTime                  @updatedAt @map("updated_at")
+  company            Company                   @relation(fields: [companyId], references: [id])
+
+  @@unique([companyId, tagType, normalizedValue, sourceType, sourceRef], map: "company_profile_tag_source_identity")
+  @@index([companyId, tagType, isCurrent], map: "company_profile_tag_company_type_current_idx")
+  @@index([snapshotUid])
+  @@map("company_profile_tag")
+}
+
+model CompanyProfileEvidenceAttachment {
+  id              Int                       @id @default(autoincrement())
+  uid             String                    @unique @default(uuid()) @db.Char(36)
+  companyId       Int                       @map("company_id")
+  userFactId      Int?                      @map("user_fact_id")
+  correctionId    Int?                      @map("correction_id")
+  fileName        String                    @map("file_name") @db.VarChar(512)
+  mimeType        String?                   @map("mime_type") @db.VarChar(128)
+  storageProvider String                    @default("MINIO") @map("storage_provider") @db.VarChar(16)
+  bucketName      String                    @map("bucket_name") @db.VarChar(63)
+  objectKey       String                    @map("object_key") @db.VarChar(700)
+  fileHash        String?                   @map("file_hash") @db.VarChar(64)
+  fileSizeBytes   BigInt?                   @map("file_size_bytes")
+  uploadedBy      Int?                      @map("uploaded_by")
+  createdAt       DateTime                  @default(now()) @map("created_at")
+  company         Company                   @relation(fields: [companyId], references: [id], map: "company_profile_evidence_company_id_fkey")
+  userFact        CompanyProfileUserFact?   @relation(fields: [userFactId], references: [id], map: "company_profile_evidence_user_fact_id_fkey")
+  correction      CompanyProfileCorrection? @relation(fields: [correctionId], references: [id], map: "company_profile_evidence_correction_id_fkey")
+
+  @@unique([bucketName, objectKey], map: "company_profile_evidence_object_identity")
+  @@index([companyId, createdAt], map: "company_profile_evidence_company_created_idx")
+  @@index([userFactId], map: "company_profile_evidence_user_fact_id_idx")
+  @@index([correctionId], map: "company_profile_evidence_correction_id_idx")
+  @@map("company_profile_evidence_attachment")
+}
+
+model CompanyProfileReviewEvent {
+  id           Int                       @id @default(autoincrement())
+  companyId    Int                       @map("company_id")
+  userFactId   Int?                      @map("user_fact_id")
+  correctionId Int?                      @map("correction_id")
+  action       String                    @db.VarChar(32)
+  fromStatus   ProfileReviewStatus?      @map("from_status")
+  toStatus     ProfileReviewStatus       @map("to_status")
+  comment      String?                   @db.Text
+  operatorId   Int?                      @map("operator_id")
+  createdAt    DateTime                  @default(now()) @map("created_at")
+  company      Company                   @relation(fields: [companyId], references: [id])
+  userFact     CompanyProfileUserFact?   @relation(fields: [userFactId], references: [id])
+  correction   CompanyProfileCorrection? @relation(fields: [correctionId], references: [id])
+
+  @@index([companyId, createdAt], map: "company_profile_review_company_created_idx")
+  @@index([userFactId], map: "company_profile_review_user_fact_id_idx")
+  @@index([correctionId], map: "company_profile_review_correction_id_idx")
+  @@map("company_profile_review_event")
 }
 
 model DataSource {
@@ -394,18 +758,20 @@ model CrawlException {
 
 model RawNotice {
   id                BigInt                @id @default(autoincrement())
+  uid               String                @unique @default(uuid()) @db.Char(36)
   dataSourceId      Int                   @map("data_source_id")
   crawlTaskId       BigInt?               @map("crawl_task_id")
   sourceUrl         String                @map("source_url") @db.VarChar(1024)
   sourceNoticeId    String?               @map("source_notice_id") @db.VarChar(256)
   title             String?               @db.VarChar(512)
-  rawHtml           String?               @map("raw_html") @db.LongText
-  rawText           String?               @map("raw_text") @db.LongText
   publishDate       DateTime?             @map("publish_date")
   crawlTime         DateTime              @default(now()) @map("crawl_time")
   parseStatus       String                @default("PENDING") @map("parse_status") @db.VarChar(32)
   fingerprint       String?               @db.VarChar(64)
+  contentVersion    Int                   @default(1) @map("content_version")
+  mongoDocumentId   String?               @map("mongo_document_id") @db.Char(24)
   createdAt         DateTime              @default(now()) @map("created_at")
+  updatedAt         DateTime              @default(now()) @updatedAt @map("updated_at")
   dataSource        DataSource            @relation(fields: [dataSourceId], references: [id])
   crawlTask         CrawlTask?            @relation(fields: [crawlTaskId], references: [id])
   attachments       RawNoticeAttachment[]
@@ -416,38 +782,44 @@ model RawNotice {
   @@index([parseStatus])
   @@index([fingerprint])
   @@index([crawlTaskId])
+  @@index([mongoDocumentId])
+  @@fulltext([title], map: "raw_notice_title_ft")
   @@map("raw_notice")
 }
 
 model RawNoticeAttachment {
-  id            BigInt    @id @default(autoincrement())
-  rawNoticeId   BigInt    @map("raw_notice_id")
-  fileName      String?   @map("file_name") @db.VarChar(512)
-  fileUrl       String?   @map("file_url") @db.VarChar(1024)
-  storagePath   String?   @map("storage_path") @db.VarChar(1024)
-  fileHash      String?   @map("file_hash") @db.VarChar(64)
-  fileSizeBytes BigInt?   @map("file_size_bytes")
-  fileType      String?   @map("file_type") @db.VarChar(32)
-  parseStatus   String    @default("PENDING") @map("parse_status") @db.VarChar(32)
-  createdAt     DateTime  @default(now()) @map("created_at")
-  rawNotice     RawNotice @relation(fields: [rawNoticeId], references: [id])
+  id                   BigInt    @id @default(autoincrement())
+  uid                  String    @unique @default(uuid()) @db.Char(36)
+  rawNoticeId          BigInt    @map("raw_notice_id")
+  fileName             String?   @map("file_name") @db.VarChar(512)
+  fileUrl              String?   @map("file_url") @db.VarChar(1024)
+  storageProvider      String    @default("MINIO") @map("storage_provider") @db.VarChar(16)
+  bucketName           String?   @map("bucket_name") @db.VarChar(63)
+  objectKey            String?   @map("object_key") @db.VarChar(700)
+  fileHash             String?   @map("file_hash") @db.VarChar(64)
+  fileSizeBytes        BigInt?   @map("file_size_bytes")
+  fileType             String?   @map("file_type") @db.VarChar(32)
+  parseStatus          String    @default("PENDING") @map("parse_status") @db.VarChar(32)
+  mongoParseDocumentId String?   @map("mongo_parse_document_id") @db.Char(24)
+  createdAt            DateTime  @default(now()) @map("created_at")
+  rawNotice            RawNotice @relation(fields: [rawNoticeId], references: [id])
 
   @@index([rawNoticeId])
   @@index([fileHash])
+  @@index([bucketName, objectKey])
   @@map("raw_notice_attachment")
 }
 
 model NoticeExtraction {
   id                BigInt         @id @default(autoincrement())
+  uid               String         @unique @default(uuid()) @db.Char(36)
   rawNoticeId       BigInt         @map("raw_notice_id")
   projectNoticeId   Int?           @map("project_notice_id")
   noticeType        String         @map("notice_type") @db.VarChar(64)
-  extractedFields   Json           @map("extracted_fields")
   extractionModel   String?        @map("extraction_model") @db.VarChar(64)
   extractionVersion String?        @map("extraction_version") @db.VarChar(32)
   confidenceScore   Decimal?       @map("confidence_score") @db.Decimal(5, 4)
-  fieldConfidences  Json?          @map("field_confidences")
-  sourceTextSnippet String?        @map("source_text_snippet") @db.Text
+  mongoDocumentId   String         @map("mongo_document_id") @db.Char(24)
   isVerified        Boolean        @default(false) @map("is_verified")
   verifiedBy        Int?           @map("verified_by")
   verifiedAt        DateTime?      @map("verified_at")
@@ -460,6 +832,7 @@ model NoticeExtraction {
   @@index([rawNoticeId])
   @@index([projectNoticeId])
   @@index([noticeType, isVerified])
+  @@index([mongoDocumentId])
   @@map("notice_extraction")
 }
 
@@ -559,6 +932,7 @@ model CompetitionAnalysis {
 
   @@index([projectId, targetCompanyId])
   @@index([competitorCompanyId])
+  @@index([targetCompanyId], map: "competition_analysis_target_company_id_fkey")
   @@map("competition_analysis")
 }
 

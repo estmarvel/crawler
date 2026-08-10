@@ -1,7 +1,7 @@
-"""五站统一的公告/附件分阶段运行器。
+"""多站统一的公告/附件分阶段运行器。
 
 站点 shell 入口只负责选择站点；所有可配置项、断点、限速、快照、日志和
-附件回写逻辑集中在这里，避免五份脚本逐渐产生不一致行为。
+附件回写逻辑集中在这里，避免各站脚本逐渐产生不一致行为。
 """
 
 from __future__ import annotations
@@ -30,7 +30,9 @@ class SiteProfile:
     default_outbound: str
     attachment_module: str
     supports_channels: bool = False
+    supports_project_types: bool = False
     parse_pdf_arg: bool = False
+    default_channels: str = ""
 
 
 PROFILES = {
@@ -40,6 +42,7 @@ PROFILES = {
         "direct",
         "crawler_scrapy.sites.sxjm.download_attachments",
         supports_channels=True,
+        default_channels="yfxm,zbxm,fzxm,jycg",
     ),
     "sxzwfw": SiteProfile(
         "sections",
@@ -57,14 +60,43 @@ PROFILES = {
     "huaxin": SiteProfile(
         "sections",
         "zbgg_zys,hxr,gs,zbjh",
-        "static",
+        "direct",
         "crawler_scrapy.sites.huaxin.download_attachments",
     ),
     "jiubang": SiteProfile(
         "sections",
         "zbgg_zys,hxr,gs,zbjh",
-        "static",
+        "direct",
         "crawler_scrapy.sites.jiubang.download_attachments",
+    ),
+    "qianji": SiteProfile(
+        "categories",
+        "plan,tender,change,candidate,award",
+        "direct",
+        "crawler_scrapy.sites.qianji.download_attachments",
+        supports_project_types=True,
+        parse_pdf_arg=True,
+    ),
+    "sxjkzcpt": SiteProfile(
+        "categories",
+        "plan,tender,change,candidate,award,contract",
+        "direct",
+        "crawler_scrapy.sites.sxjkzcpt.download_attachments",
+        supports_channels=True,
+        default_channels="zbcg,qzbcg",
+    ),
+    "trade365": SiteProfile(
+        "categories",
+        "tender,change,candidate,award",
+        "direct",
+        "crawler_scrapy.sites.trade365.download_attachments",
+        supports_project_types=True,
+    ),
+    "sxbid": SiteProfile(
+        "categories",
+        "plan,prequalification,tender,candidate,final_candidate,award,correction,contract",
+        "direct",
+        "crawler_scrapy.sites.sxbid.download_attachments",
     ),
 }
 
@@ -102,10 +134,31 @@ def build_parser(site: str) -> argparse.ArgumentParser:
     parser.add_argument("--start-date")
     parser.add_argument("--end-date")
     parser.add_argument("--sections", default=profile.default_sections)
-    parser.add_argument("--channels", default="yfxm,zbxm,fzxm,jycg")
+    parser.add_argument(
+        "--channels",
+        default=profile.default_channels or "yfxm,zbxm,fzxm,jycg",
+        help="站点频道；SXJKZCPT 支持 zbcg,qzbcg",
+    )
+    parser.add_argument(
+        "--project-types",
+        default="engineering,goods,service",
+        help="Qianji/TRADE365 二级项目类型；其他网站忽略",
+    )
     parser.add_argument("--page-size", type=_positive_int, default=100)
     parser.add_argument("--max-records", type=_positive_int, default=1_000_000)
     parser.add_argument("--max-pages", type=_positive_int, default=10_000)
+    parser.add_argument(
+        "--sample-mode",
+        choices=("latest", "random"),
+        default="latest",
+        help="SXJKZCPT 抽样方式；latest=顺序，random=按历史页随机抽样",
+    )
+    parser.add_argument(
+        "--sample-seed",
+        type=int,
+        default=20260806,
+        help="SXJKZCPT 可复现随机抽样种子",
+    )
     parser.add_argument("--outbound-mode", choices=("direct", "static"), default=profile.default_outbound)
     parser.add_argument("--concurrency", type=_positive_int, default=2)
     parser.add_argument("--delay-min", type=_nonnegative_float, default=3.0)
@@ -138,22 +191,39 @@ class SiteRunner:
             self.output_root = self.output_root.resolve()
         self.python = self._python_command()
         self.start_date, self.end_date = self._date_window()
+        scope_values = {
+            "site": site,
+            "start": self.start_date,
+            "end": self.end_date,
+            "all": args.all_history,
+            "sections": args.sections,
+            "channels": args.channels if self.profile.supports_channels else None,
+            "project_types": (
+                args.project_types if self.profile.supports_project_types else None
+            ),
+            "page_size": args.page_size,
+            "max_records": args.max_records,
+            "max_pages": args.max_pages,
+            "sample_mode": args.sample_mode if site == "sxjkzcpt" else None,
+            "sample_seed": args.sample_seed if site == "sxjkzcpt" else None,
+        }
         self.scope_material = json.dumps(
-            {
-                "site": site,
-                "start": self.start_date,
-                "end": self.end_date,
-                "all": args.all_history,
-                "sections": args.sections,
-                "channels": args.channels if self.profile.supports_channels else None,
-                "page_size": args.page_size,
-                "max_records": args.max_records,
-                "max_pages": args.max_pages,
-            },
+            scope_values,
             ensure_ascii=False,
             sort_keys=True,
         )
-        digest = hashlib.sha256(self.scope_material.encode()).hexdigest()[:12]
+        # 全历史任务的实际请求截止日期需要随启动日期变化，但它不应改变任务
+        # 身份和 JOBDIR，否则跨日重启会从 2020 年重新扫描。保留真实日期用于
+        # 日志/完成记录，只在 scope 哈希中使用稳定哨兵。
+        scope_identity = dict(scope_values)
+        if args.all_history and site == "sxzwfw":
+            scope_identity["start"] = "ALL_HISTORY"
+            scope_identity["end"] = "ALL_HISTORY"
+        digest = hashlib.sha256(
+            json.dumps(
+                scope_identity, ensure_ascii=False, sort_keys=True
+            ).encode()
+        ).hexdigest()[:12]
         window = "all" if args.all_history else f"{self.start_date}_to_{self.end_date}"
         self.scope_key = f"{window}_{digest}"
         self.site_dir = self.output_root / site
@@ -169,12 +239,53 @@ class SiteRunner:
             ]
             if len(candidates) == 1:
                 self.scope_key = candidates[0].name
+        if site == "sxzwfw" and args.all_history:
+            self._adopt_sxzwfw_legacy_history_state()
         self.log_dir = self.site_dir / "logs"
         self.state_dir = self.site_dir / "state" / "runner" / self.scope_key
         self.job_dir = self.site_dir / "state" / "jobs" / "notices" / self.scope_key
         self.lock_path = self.site_dir / "state" / "resumable.lock"
         for path in (self.log_dir, self.state_dir, self.job_dir):
             path.mkdir(parents=True, exist_ok=True)
+
+    @staticmethod
+    def _chunk_number(path: Path) -> int:
+        try:
+            return int((path / "chunk").read_text(encoding="utf-8").strip())
+        except (OSError, ValueError):
+            return -1
+
+    def _adopt_sxzwfw_legacy_history_state(self) -> None:
+        """把按旧版动态日期生成的最深全历史断点迁移到稳定 scope。"""
+
+        runner_root = self.site_dir / "state" / "runner"
+        job_root = self.site_dir / "state" / "jobs" / "notices"
+        stable_runner = runner_root / self.scope_key
+        stable_job = job_root / self.scope_key
+        if stable_runner.exists() or stable_job.exists():
+            return
+        candidates = [
+            path
+            for path in runner_root.glob("all_*")
+            if path.is_dir() and (path / "chunk").exists()
+        ]
+        if not candidates:
+            return
+        source_runner = max(
+            candidates,
+            key=lambda path: (self._chunk_number(path), path.stat().st_mtime),
+        )
+        source_job = job_root / source_runner.name
+        runner_root.mkdir(parents=True, exist_ok=True)
+        job_root.mkdir(parents=True, exist_ok=True)
+        source_runner.rename(stable_runner)
+        if source_job.exists():
+            source_job.rename(stable_job)
+        print(
+            f"SXZWFW 已迁移旧全历史断点：{source_runner.name} -> "
+            f"{self.scope_key}（chunk={self._chunk_number(stable_runner)}）",
+            flush=True,
+        )
 
     def _python_command(self) -> str:
         configured = os.environ.get("CRAWLER_PYTHON_COMMAND", "").strip()
@@ -217,6 +328,13 @@ class SiteRunner:
         ]
         if self.profile.supports_channels:
             values += ["-a", f"channels={self.args.channels}"]
+        if self.site == "sxjkzcpt":
+            values += [
+                "-a", f"sample_mode={self.args.sample_mode}",
+                "-a", f"sample_seed={self.args.sample_seed}",
+            ]
+        if self.profile.supports_project_types:
+            values += ["-a", f"project_types={self.args.project_types}"]
         if self.profile.parse_pdf_arg:
             # 签章 PDF 作为附件在第二阶段下载；公告阶段使用 API/HTML 正文。
             values += ["-a", "parse_pdf=false"]
@@ -228,6 +346,9 @@ class SiteRunner:
 
     def _settings(self, request_delay: float) -> list[str]:
         check_updates = "False" if self.args.check_updates else "True"
+        # sxbid 对短时间并行请求会偶发返回 nginx 错误，强制单域单并发；
+        # 用户仍可调节 3~5 秒间隔和分批冷却，但不能绕过这个站点保护。
+        concurrency = 1 if self.site == "sxbid" else self.args.concurrency
         values = {
             "CRAWLER_OUTBOUND_MODE": self.args.outbound_mode,
             "NOTICE_OUTPUT_ROOT": str(self.output_root),
@@ -242,8 +363,8 @@ class SiteRunner:
             "FILES_STORE": str(self.output_root),
             "JOBDIR": str(self.job_dir),
             "HTTPCACHE_ENABLED": "False",
-            "CONCURRENT_REQUESTS": str(self.args.concurrency),
-            "CONCURRENT_REQUESTS_PER_DOMAIN": str(self.args.concurrency),
+            "CONCURRENT_REQUESTS": str(concurrency),
+            "CONCURRENT_REQUESTS_PER_DOMAIN": str(concurrency),
             "DOWNLOAD_DELAY": f"{request_delay:.3f}",
             # 每批从 3~5 秒中抽一个间隔；关闭 Scrapy 的 0.5~1.5 倍扩散，
             # 避免实际落到 3 秒以下。AutoThrottle 遇到延迟升高时仍可主动降速。
@@ -255,8 +376,8 @@ class SiteRunner:
             "RETRY_TIMES": "1",
             "DOWNLOAD_TIMEOUT": str(self.args.request_timeout),
             "CLOSESPIDER_PAGECOUNT": str(self.args.responses_per_chunk),
-            "DIRECT_CONCURRENT_REQUESTS": str(self.args.concurrency),
-            "DIRECT_CONCURRENT_REQUESTS_PER_DOMAIN": str(self.args.concurrency),
+            "DIRECT_CONCURRENT_REQUESTS": str(concurrency),
+            "DIRECT_CONCURRENT_REQUESTS_PER_DOMAIN": str(concurrency),
             "DIRECT_DOWNLOAD_DELAY": f"{request_delay:.3f}",
             "DIRECT_AUTOTHROTTLE_START_DELAY": f"{request_delay:.3f}",
             "DIRECT_AUTOTHROTTLE_TARGET_CONCURRENCY": "0.5",
@@ -319,11 +440,12 @@ class SiteRunner:
                 chunk += 1
                 chunk_path.write_text(f"{chunk}\n", encoding="utf-8")
                 delay = random.uniform(self.args.delay_min, self.args.delay_max)
+                effective_concurrency = 1 if self.site == "sxbid" else self.args.concurrency
                 stamp = time.strftime("%Y%m%d_%H%M%S")
                 log_path = self.log_dir / f"{self.scope_key}_chunk_{chunk:05d}_{stamp}.log"
                 print(
                     f"[{time.strftime('%F %T')}] {self.site} 公告第{chunk}批："
-                    f"并发={self.args.concurrency} 间隔={delay:.2f}s "
+                    f"并发={effective_concurrency} 间隔={delay:.2f}s "
                     f"响应预算={self.args.responses_per_chunk} 日志={log_path}",
                     flush=True,
                 )

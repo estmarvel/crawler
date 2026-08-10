@@ -20,7 +20,7 @@ class BitbidSpider(BaseNoticeSpider):
     platform_name = config.PLATFORM_NAME
     platform_code = config.PLATFORM_CODE
     allowed_domains = ["www.bitbid.cn", "zb.bitbid.cn"]
-    parser_version = "bitbid-v1-site-api-html-pdf"
+    parser_version = BitbidParser.parser_version
     extraction_model_name = "bitbid-site-rule-parser"
 
     custom_settings = {
@@ -41,6 +41,24 @@ class BitbidSpider(BaseNoticeSpider):
         pipelines["crawler_scrapy.pipelines.NoticeMultiFormatPipeline"] = None
         pipelines["crawler_scrapy.sites.bitbid.exporter.BitbidMultiFormatPipeline"] = 300
         settings.set("ITEM_PIPELINES", pipelines, priority="spider")
+
+        mode = str(settings.get("CRAWLER_OUTBOUND_MODE", "direct")).strip().lower()
+        if mode not in {"direct", "static"}:
+            raise ValueError(
+                f"不支持的 CRAWLER_OUTBOUND_MODE={mode!r}；可选 direct/static"
+            )
+        middlewares = settings.getdict("DOWNLOADER_MIDDLEWARES")
+        static_middleware = (
+            "crawler_scrapy.transport.proxy_middleware.StaticProxyMiddleware"
+        )
+        middlewares[static_middleware] = 610 if mode == "static" else None
+        middlewares[
+            "crawler_scrapy.transport.access_guard.DirectAccessGuardMiddleware"
+        ] = 650
+        settings.set("DOWNLOADER_MIDDLEWARES", middlewares, priority="spider")
+        settings.set("STATIC_PROXY_ENABLED", mode == "static", priority="spider")
+        # 直连时禁止继承宿主机 HTTP_PROXY，保证出口策略与日志记录一致。
+        settings.set("HTTPPROXY_ENABLED", mode == "static", priority="spider")
 
     def __init__(
         self,
@@ -180,9 +198,10 @@ class BitbidSpider(BaseNoticeSpider):
                 break
             self._seen.add(identity)
             detail_url = config.detail_page_url(category, notice_id)
+            source_notice_id = config.source_notice_id(category, notice_id)
             title = str(raw.get("gongGaoMingCheng") or raw.get("title") or raw.get("gongShiBiaoTi") or "")
             should_fetch, fingerprint = self.check_notice_candidate(
-                notice_id=notice_id,
+                notice_id=source_notice_id,
                 notice_type=config.CATEGORIES[category]["label"],
                 list_record=raw,
                 detail_url=detail_url,
@@ -274,6 +293,7 @@ class BitbidSpider(BaseNoticeSpider):
             category, payload, pdf_text=pdf_text
         )
         notice_id = str(detail.get("id") or list_record.get("id") or "")
+        source_notice_id = config.source_notice_id(category, notice_id)
         title = str(
             detail.get("gongGaoMingCheng")
             or detail.get("gongShiBiaoTi")
@@ -292,7 +312,7 @@ class BitbidSpider(BaseNoticeSpider):
         return self.build_notice_item(
             notice_type=notice_type,
             notice_subtype=category,
-            notice_id=notice_id,
+            notice_id=source_notice_id,
             title=title,
             publish_time=publish_time,
             detail_url=config.detail_page_url(category, notice_id),

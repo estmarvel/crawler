@@ -438,52 +438,171 @@ def _contacts(text: str) -> dict[str, str]:
     }
 
 
-def _project_numbers(text: str) -> str:
+PROJECT_IDENTIFIER_LABELS = (
+    "投资项目统一代码",
+    "项目代码",
+    "招标项目编号",
+    "采购项目编号",
+    "项目编号",
+)
+TENDER_IDENTIFIER_LABELS = ("招标编号", "采购编号", "代理编号")
+IDENTIFIER_PROSE_MARKERS = (
+    "资金来源", "招标人", "采购人", "已由", "批准", "建设单位", "本项目",
+    "经评标委员会", "经评审", "现将", "现对", "进行公开招标",
+    "项目总投资", "招标控制总价", "项目建设地址", "项目地址", "建设地点",
+    "建设规模", "招标范围", "招标编号",
+)
+
+
+def _valid_identifier(value: str) -> bool:
+    if not 4 <= len(value) <= 128:
+        return False
+    if value.upper() in {"NULL", "NONE", "N/A", "N-A"}:
+        return False
+    if any(marker in value for marker in IDENTIFIER_PROSE_MARKERS):
+        return False
+    if re.search(r"[：:&|；;]", value):
+        return False
+    if not all(
+        value.count(opening) == value.count(closing)
+        for opening, closing in (("(", ")"), ("（", "）"), ("[", "]"), ("【", "】"))
+    ):
+        return False
+    return bool(re.search(r"[0-9]", value))
+
+
+def _clean_identifier_value(value: Any, labels: Iterable[str] = ()) -> str:
+    """清洗标签后的单个编号，不让同一行后续说明文字进入编号。
+
+    SXZWFW 的 PDF 转 HTML 文本经常把 ``）已由……批准`` 与编号放在同一
+    行；编号自身又可能包含 ``（2026）``、``【2026】``，所以不能简单按
+    第一个右括号截断。这里保留成对括号，并在未配对括号、顶层标点或常见
+    说明性短语前停止。
+    """
+
+    result = re.sub(r"[\t\r\n]+", " ", _string(value)).strip()
+    if not result:
+        return ""
+
+    label_values = tuple(labels)
+    if label_values:
+        label_pattern = "|".join(
+            re.escape(label) for label in sorted(label_values, key=len, reverse=True)
+        )
+        repeated = re.compile(rf"^\s*(?:{label_pattern})\s*[：:]\s*")
+        while repeated.match(result):
+            result = repeated.sub("", result, count=1).strip()
+
+    # PDF 转文本后，章节号常与编号无空格粘连，例如
+    # ``E...0012.3项目地址``；这里的 ``2.3`` 属于下一字段，而非编号。
+    result = re.split(
+        r"2\.(?:2|3|4|5)\s*(?=(?:项目|建设|招标|监理|工程))",
+        result,
+        maxsplit=1,
+    )[0]
+    result = re.split(
+        r"(?:项目总投资(?:为)?|招标控制总价|招标编号|项目建设地址|项目地址|"
+        r"建设地点|建设规模(?:及(?:主要)?内容)?|招标范围)\s*[：:]",
+        result,
+        maxsplit=1,
+    )[0]
+
+    closing_for = {"(": ")", "（": "）", "[": "]", "【": "】"}
+    closing = set(closing_for.values())
+    stack: list[str] = []
+    kept: list[str] = []
+    for character in result:
+        if character in closing_for:
+            stack.append(closing_for[character])
+            kept.append(character)
+            continue
+        if character in closing:
+            if not stack or stack[-1] != character:
+                break
+            stack.pop()
+            kept.append(character)
+            continue
+        if not stack and character in "，,。；;":
+            break
+        kept.append(character)
+    result = "".join(kept).strip()
+
+    prose_stops = (
+        "项目资金来源", "资金来源", "招标人为", "采购人为", "已由", "是由",
+        "由太原市", "由山西省", "批准建设", "批准", "本项目已",
+        "经评标委员会", "经评审", "现将", "现对", "进行公开招标",
+    )
+    stop_indexes = [result.find(marker) for marker in prose_stops if marker in result]
+    if stop_indexes:
+        result = result[:min(stop_indexes)]
+
+    result = re.sub(r"\s+", "", result).strip("：:，,。；;、")
+    result = re.sub(r"^(?:变更为|变更后(?:为)?)[：:]?", "", result)
+    for opening, ending in (("(", ")"), ("（", "）"), ("[", "]"), ("【", "】")):
+        if result.startswith(opening) and result.endswith(ending):
+            result = result[1:-1].strip("：:，,。；;、")
+            break
+    if not _valid_identifier(result):
+        return ""
+    return result
+
+
+def _identifier_values(text: str, labels: Iterable[str]) -> list[str]:
+    """按调用方给出的标签优先级返回去重后的可靠编号。"""
+
+    label_values = tuple(labels)
     values: list[str] = []
-    # 保留“晋新招字（2026）第043号”这类包含内部括号的完整编号。
-    for match in re.finditer(
-        r"(?m)^\s*[（(]?(?:招标项目编号|项目编号|招标编号|标段编号)\s*[：:]\s*(.+?)\s*$",
-        text,
-    ):
-        value = _space(match.group(1))
-        if value.endswith(("）", ")")):
-            value = value[:-1].rstrip()
-        if value and value not in values:
-            values.append(value)
-    for pattern in (
-        r"(?:招标项目编号|项目编号|招标编号|标段编号)\s*[：:]\s*([^，,。；;\n（）()]+)",
-        r"\bE\d{16,22}\b",
-    ):
-        for match in re.finditer(pattern, text):
-            value = _space(match.group(1) if match.lastindex else match.group(0))
-            if value and value not in values and not any(value in old for old in values):
-                values.append(value)
-    return "|".join(values)
+    for label in label_values:
+        label_pattern = (
+            rf"(?<!招标)(?<!采购){re.escape(label)}"
+            if label == "项目编号"
+            else re.escape(label)
+        )
+        patterns = (
+            rf"(?m)^\s*[（(]?(?:\d+(?:\.\d+)*[、.．]?\s*)?"
+            rf"{label_pattern}[ \t]*[：:][ \t]*([^\n]+)",
+            rf"{label_pattern}[ \t]*[：:][ \t]*([^，,。；;\n]+)",
+        )
+        for pattern in patterns:
+            for match in re.finditer(pattern, text):
+                value = _clean_identifier_value(match.group(1), label_values)
+                # PDF 视觉文本可能在编号中间换行，例如 ``202\n6GC010064``。
+                # 仅当第一段本身不是有效编号时，拼接紧随其后的字母数字段。
+                if not value:
+                    following = re.match(
+                        r"\s*\n\s*([A-Za-z0-9][A-Za-z0-9._/\\-]{1,100})",
+                        text[match.end():],
+                    )
+                    if following:
+                        prefix = _string(match.group(1))
+                        continuation = following.group(1)
+                        value = _clean_identifier_value(
+                            continuation if not re.search(r"\d", prefix) else f"{prefix}{continuation}",
+                            label_values,
+                        )
+                if value and value not in values:
+                    values.append(value)
+    return values
 
 
 def _labelled_identifiers(text: str, labels: Iterable[str]) -> str:
-    """按明确标签提取编号，避免把项目编号和代理招标编号混写。"""
+    """返回最高优先级的单个编号，供数据库关联字段使用。"""
 
-    label_pattern = "|".join(
-        re.escape(label) for label in sorted(labels, key=len, reverse=True)
-    )
-    values: list[str] = []
-    patterns = (
-        rf"(?m)^\s*[（(]?(?:{label_pattern})\s*[：:]\s*(.+?)\s*$",
-        rf"(?:{label_pattern})\s*[：:]\s*([^，,。；;\n]+)",
-    )
-    for pattern in patterns:
-        for match in re.finditer(pattern, text):
-            value = _space(match.group(1)).strip()
-            if (
-                value.endswith("）") and value.count("（") < value.count("）")
-            ) or (
-                value.endswith(")") and value.count("(") < value.count(")")
-            ):
-                value = value[:-1].rstrip()
-            if value and value not in values and not any(value in old for old in values):
-                values.append(value)
-    return "|".join(values)
+    values = _identifier_values(text, labels)
+    return values[0] if values else ""
+
+
+def _project_numbers(text: str) -> str:
+    """保留正文中的全部业务编号，但不把组合值当成项目主键。"""
+
+    values = [
+        *_identifier_values(text, PROJECT_IDENTIFIER_LABELS),
+        *_identifier_values(text, TENDER_IDENTIFIER_LABELS),
+    ]
+    for match in re.finditer(r"\b[EMD][A-Za-z0-9]{16,30}\b", text):
+        if match.group(0) not in values:
+            values.append(match.group(0))
+    return "；".join(dict.fromkeys(values))
 
 
 def _project_investment(text: str) -> str:
@@ -492,7 +611,13 @@ def _project_investment(text: str) -> str:
         ("项目总投资", "估算金额", "项目估算", "估算总投资", "计划投资"),
     )
     if value:
-        return _trim_following_numbered_field(value)
+        value = _trim_following_numbered_field(value)
+        match = re.match(
+            r"^(?:为|约|人民币|：|:|\s)*"
+            r"([\d,，]+(?:\.\d+)?\s*(?:亿元|万元|元))",
+            value,
+        )
+        return _space(match.group(1)) if match else value
     match = re.search(
         r"(?:项目总投资|估算总投资|总投资|计划投资|投资额)\s*"
         r"(?:[：:]\s*)?(?:为|约)?\s*(?:总投资\s*)?"
@@ -512,11 +637,23 @@ def _time_range(text: str, labels: Iterable[str]) -> str:
 def _monetary_label_paragraph(text: str, labels: Iterable[str]) -> str:
     """优先保留标签后的总额，避免金额标准化误取括号内最后一个分标段值。"""
 
-    value = _label_paragraph(text, labels)
+    label_values = tuple(labels)
+    label_pattern = "|".join(
+        re.escape(label) for label in sorted(label_values, key=len, reverse=True)
+    )
+    direct = re.search(
+        rf"(?:{label_pattern})\s*(?:约|为)?\s*[：:]?\s*"
+        r"([\d,，]+(?:\.\d+)?\s*(?:亿元|万元|元))",
+        text,
+    )
+    if direct:
+        return _space(direct.group(1))
+    value = _label_paragraph(text, label_values)
     if not value:
         return ""
     match = re.match(
-        r"^(?:为|人民币)?\s*([\d,，]+(?:\.\d+)?\s*(?:亿元|万元|元))",
+        r"^(?:为|约|人民币|：|:|\s)*"
+        r"([\d,，]+(?:\.\d+)?\s*(?:亿元|万元|元))",
         value,
     )
     return _space(match.group(1)) if match else value
@@ -889,7 +1026,7 @@ def _cms_attachment(html_text: str, document, fallback_id: str) -> tuple[dict[st
 class SxzwfwParser:
     """把列表元数据和详情 HTML 转换为框架八类公告字段。"""
 
-    parser_version = "sxzwfw-v5-engineering-live-fields"
+    parser_version = "sxzwfw-v8-field-boundaries"
 
     @classmethod
     def parse_list_records(cls, html_value: bytes | str) -> list[dict[str, str]]:
@@ -967,12 +1104,12 @@ class SxzwfwParser:
         if "项目编号" in data:
             data["项目编号"] = _labelled_identifiers(
                 text,
-                ("招标项目编号", "项目编号", "投资项目统一代码", "项目代码"),
+                PROJECT_IDENTIFIER_LABELS,
             )
         if "招标编号" in data:
             data["招标编号"] = _labelled_identifiers(
                 text,
-                ("招标编号", "采购编号", "代理编号"),
+                TENDER_IDENTIFIER_LABELS,
             )
         contacts = _contacts(text)
 
@@ -1004,7 +1141,8 @@ class SxzwfwParser:
                 text,
                 (
                     "最高投标限价总价", "招标控制总价", "财政审定金额",
-                    "招标金额", "最高投标限价", "最高限价", "招标控制价",
+                    "本次招标金额", "招标金额", "最高投标限价", "最高限价",
+                    "招标控制价",
                 ),
             )
             funding = _label_value(text, ("资金来源", "项目资金来源", "建设资金来源"))
@@ -1150,7 +1288,9 @@ class SxzwfwParser:
             data["监督部门联系人"] = _label_value(supervision, ("联系人",))
             data["监督部门联系方式"] = _label_value(supervision, ("电话", "联系电话", "联系方式"))
         elif subtype == "htly":
-            data["项目编号"] = _project_numbers(text)
+            data["项目编号"] = _labelled_identifiers(
+                text, PROJECT_IDENTIFIER_LABELS
+            )
             data["合同名称"] = _label_value(text, ("合同名称",)) or _clean_project_name(title)
             data["招标人名称"] = contacts["bidder_name"] or _label_value(text, ("招标人", "采购人"))
             winner = _label_value(text, ("中标人", "承包人", "供应商"))

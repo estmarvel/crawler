@@ -21,5 +21,5 @@ class JiubangSpider(HuaxinSpider):
     platform_name = config.PLATFORM_NAME
     platform_code = config.PLATFORM_CODE
     allowed_domains = ["www.bjjbkj.cn"]
-    parser_version = "jiubang-v6-trace-and-fulltext"
+    parser_version = parser_class.parser_version
     extraction_model_name = "jiubang-rule-parser"

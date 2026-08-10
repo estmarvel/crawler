@@ -31,6 +31,7 @@
 # Crawler runtime output, snapshots, attachments, logs and resumable state
 **/output/
 **/new_output/
+**/new_output_*/
 **/test_output/
 **/logs/
 **/httpcache/
@@ -40,6 +41,7 @@
 # Local database files, dumps and recovery backups
 /mysql_data/
 /backups/
+**/db_backups/
 *.db
 *.sqlite
 *.sqlite3
@@ -63,15 +65,12 @@
 /project/
 /refactor/
 
-# Local Qianji prototype is outside the current five-site release.
-/Crawler_Scrapy/crawler_scrapy/docs/qianji/
-/Crawler_Scrapy/crawler_scrapy/sites/qianji/
-/Crawler_Scrapy/crawler_scrapy/spiders/qianji.py
+# Superseded Qianji scheduled/history launchers; the maintained implementation
+# is crawler_scrapy/sites/qianji, spiders/qianji.py and run_qianji.sh.
 /Crawler_Scrapy/install_qianji_daily_cron.sh
 /Crawler_Scrapy/run_qianji_daily.py
 /Crawler_Scrapy/run_qianji_daily.sh
 /Crawler_Scrapy/run_qianji_history.sh
-/Crawler_Scrapy/tests/test_qianji_spider.py
 
 # Superseded local handoff/deployment drafts; maintained docs are under
 # Crawler_Scrapy/crawler_scrapy/docs.

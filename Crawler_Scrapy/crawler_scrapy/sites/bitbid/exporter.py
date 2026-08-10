@@ -39,9 +39,17 @@ class BitbidMultiFormatPipeline(SxjmMultiFormatPipeline):
                 f"比比网栏目与Schema不一致：subtype={subtype} type={actual_type}"
             )
         record = self._build_record(adapter, schema_type)
+        if subtype == "award" and any(
+            word in str(adapter.get("title") or "")
+            for word in ("废标", "流标", "终止", "撤销")
+        ):
+            # 源站把废标结果混在“中标结果”栏目；字段形状仍复用结果公示，
+            # 生命周期编码按数据库约定保存为 TERMINATION。
+            record["公告类型"] = "TERMINATION"
+        json_record = self._build_json_record(adapter, schema_type, record)
         csv_writer = self._get_csv_writer(route)
         self._get_json_path(route)
-        self._append_json_record(route, record)
+        self._append_json_record(route, json_record)
         csv_writer.writerow(
             {key: self._serialize_csv(value) for key, value in record.items()}
         )

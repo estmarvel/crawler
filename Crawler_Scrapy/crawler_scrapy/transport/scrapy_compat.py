@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 
+from scrapy.utils.defer import deferred_from_coro
 from twisted.internet.defer import ensureDeferred
 
 
@@ -25,7 +26,17 @@ def request_spider_close(engine, spider, reason: str):
             result = async_close(spider, reason=reason)
         else:
             result = async_close(reason=reason)
-        return ensureDeferred(result) if inspect.isawaitable(result) else result
+        # Scrapy 2.16 的 asyncio reactor 下不能用 Twisted.ensureDeferred
+        # 包装会 await asyncio Future 的协程，否则关停时会报
+        # ``await wasn't used with future`` 并残留进程。
+        try:
+            return deferred_from_coro(result)
+        except RuntimeError as exc:
+            # 纯单元测试环境可能尚未安装 reactor；此时协程不包含
+            # asyncio Future，沿用 Twisted 兼容包装即可。
+            if "without an installed reactor" not in str(exc):
+                raise
+            return ensureDeferred(result)
 
     legacy_close = getattr(engine, "close_spider", None)
     if callable(legacy_close):

@@ -34,7 +34,7 @@ class HuaxinSpider(BaseNoticeSpider):
     platform_name = config.PLATFORM_NAME
     platform_code = config.PLATFORM_CODE
     allowed_domains = ["www.ygcgpt.com"]
-    parser_version = "huaxin-v11-trace-and-fulltext"
+    parser_version = parser_class.parser_version
     extraction_model_name = "huaxin-rule-parser"
 
     # 结构化 API 已直接返回的字段不再交给 AI；只有规则解析后仍为空、且可能
@@ -107,7 +107,7 @@ class HuaxinSpider(BaseNoticeSpider):
         """选择受保护直连、固定代理或天启代理出口。"""
 
         super().update_settings(settings)
-        mode = str(settings.get("CRAWLER_OUTBOUND_MODE", "static")).strip().lower()
+        mode = str(settings.get("CRAWLER_OUTBOUND_MODE", "direct")).strip().lower()
         if mode == "tianqi":
             return
         if mode not in {"direct", "static"}:

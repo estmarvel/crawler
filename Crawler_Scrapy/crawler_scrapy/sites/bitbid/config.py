@@ -9,7 +9,10 @@ PLATFORM_NAME = "比比网电子招投标交易平台"
 PLATFORM_CODE = "bitbid"
 WEB_BASE_URL = "http://www.bitbid.cn"
 API_BASE_URL = f"{WEB_BASE_URL}/api/home"
-PDF_BASE_URL = "http://zb.bitbid.cn"
+# 官网当前详情页（2026-08-06 前端包）将三类签章 PDF 请求发往
+# 当前站点的 /auth 路由；旧 zb.bitbid.cn 会跳转到失效页面。
+PDF_BASE_URL = WEB_BASE_URL
+PLAN_FILE_BASE_URL = "http://xzb.bitbid.cn"
 LIST_URL = f"{API_BASE_URL}/bbzbMoreList"
 
 CATEGORIES = {
@@ -19,6 +22,15 @@ CATEGORIES = {
     "award": {"label": "中标结果公示", "gg_type": 3, "detail_api": "zbjgInfo", "query_type": 2},
 }
 DEFAULT_CATEGORIES = tuple(CATEGORIES)
+
+
+def source_notice_id(category: str, notice_id: str | int) -> str:
+    """比比网各公告表的数字主键会重复，数据库身份必须带栏目命名空间。"""
+
+    value = str(notice_id).strip()
+    if category not in CATEGORIES or not value:
+        raise ValueError(f"无效的 Bitbid 公告身份：category={category!r}, id={value!r}")
+    return f"{category}:{value}"
 
 
 def list_url(category: str, page: int, page_size: int, **filters: str) -> str:

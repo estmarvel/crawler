@@ -489,8 +489,19 @@ def coerce_datetime(value: Any) -> datetime | None:
     text = str(value).strip()
     if not text:
         return None
-    normalized = text.replace("年", "-").replace("月", "-").replace("日", "")
+    normalized = text.replace("年", "-").replace("月", "-").replace("日", " ")
     normalized = normalized.replace("/", "-").replace("T", " ")
+    normalized = re.sub(
+        r"(\d{1,2})时(\d{1,2})分(?:(\d{1,2})秒)?",
+        r"\1:\2:\3",
+        normalized,
+    ).rstrip(":")
+    normalized = re.sub(
+        r"[（(](?:北京时间|中国标准时间|GMT\+?8)[）)]",
+        "",
+        normalized,
+        flags=re.IGNORECASE,
+    ).strip()
     normalized = re.sub(r"\s+", " ", normalized).strip()
     if normalized.endswith("Z"):
         normalized = normalized[:-1] + "+00:00"
@@ -549,7 +560,13 @@ def coerce_decimal_amount(value: Any) -> Decimal | None:
         return Decimal(str(value)).quantize(Decimal("0.01"))
 
     text = str(value).strip()
-    if not text or any(marker in text for marker in ("%", "％", "单价", "费率", "折扣")):
+    if (
+        not text
+        or any(marker in text for marker in ("%", "％", "单价", "费率", "折扣"))
+        # “元/个、元/年、元/千瓦时”等是单价/费率，不可写成普通总金额，
+        # 还必须保留小数精度和分母单位以便溯源。
+        or re.search(r"(?:亿元|万元|元)\s*[/／每]", text)
+    ):
         return None
 
     matches = _AMOUNT_NUMBER_RE.findall(text)

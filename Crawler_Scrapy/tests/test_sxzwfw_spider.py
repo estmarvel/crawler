@@ -2,14 +2,17 @@ from __future__ import annotations
 
 from datetime import date
 import hashlib
+import inspect
 from pathlib import Path
 from urllib.parse import parse_qs
 import unittest
 from unittest.mock import patch
+import warnings
 
 from scrapy import Request
 from scrapy.http import TextResponse
 from scrapy.settings import Settings
+from scrapy.utils.misc import warn_on_generator_with_return_value
 
 from crawler_scrapy.items import NoticeItem
 from crawler_scrapy.sites.sxzwfw import config
@@ -21,6 +24,15 @@ DOCS = Path(__file__).parents[1] / "crawler_scrapy" / "docs" / "sxzwfw"
 
 
 class SxzwfwSpiderTest(unittest.TestCase):
+    def test_parse_list_is_regular_callback_without_generator_return_warning(self):
+        self.assertFalse(inspect.isgeneratorfunction(SxzwfwSpider.parse_list))
+        spider = SxzwfwSpider(sections="zbgg_zys", days=1)
+        spider.settings = Settings({"WARN_ON_GENERATOR_RETURN_VALUE": True})
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            warn_on_generator_with_return_value(spider, spider.parse_list)
+        self.assertEqual(caught, [])
+
     def test_direct_mode_uses_local_ip_with_guard_and_no_system_proxy(self):
         settings = Settings(
             {

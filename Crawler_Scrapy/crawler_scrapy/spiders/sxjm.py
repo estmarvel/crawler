@@ -22,7 +22,7 @@ class SxjmSpider(BaseNoticeSpider):
     platform_name = config.PLATFORM_NAME
     platform_code = config.PLATFORM_CODE
     allowed_domains = ["www.sxccdzzcpt.cn"]
-    parser_version = "sxjm-v11-source-type-preserved"
+    parser_version = SxjmParser.parser_version
     extraction_model_name = "sxjm-site-rule-parser"
 
     custom_settings = {

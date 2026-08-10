@@ -2,7 +2,12 @@
 
 const assert = require("node:assert/strict");
 const test = require("node:test");
-const { SITE_CONFIG, traceEnvelope } = require("../lib/runtime");
+const {
+  SITE_CONFIG,
+  compactDatabaseString,
+  stableDigest,
+  traceEnvelope,
+} = require("../lib/runtime");
 const { exportMetadata } = require("../import_raw_notices");
 const {
   buildEvidence,
@@ -16,7 +21,8 @@ test("legacy records without _trace remain supported", () => {
 
 test("sxzwfw output is a supported split-storage import source", () => {
   assert.deepEqual(SITE_CONFIG.sxzwfw.shortCodes, ["sxzwfw"]);
-  assert.equal(SITE_CONFIG.sxzwfw.preferredDataSourceId, null);
+  assert.equal(SITE_CONFIG.sxzwfw.preferredDataSourceId, 21);
+  assert.equal(SITE_CONFIG.bitbid.preferredDataSourceId, 12);
 });
 
 test("trace envelope accepts the crawler v1 contract", () => {
@@ -45,6 +51,19 @@ test("trace envelope rejects values that MongoDB validators cannot store", () =>
     () => traceEnvelope({ _trace: { schemaVersion: "1.0", payload: {}, fieldMeta: { evidence: "bad" } } }, "bad"),
     /evidence must be an array/,
   );
+});
+
+test("long crawler versions are compacted deterministically for MySQL varchar columns", () => {
+  const source = "sxzwfw-v5-engineering-live-fields";
+  const compacted = compactDatabaseString(source, 32);
+  assert.equal([...compacted].length, 32);
+  assert.equal(compacted, compactDatabaseString(source, 32));
+  assert.notEqual(compacted, compactDatabaseString(`${source}-other`, 32));
+});
+
+test("stable digest ignores object key order but preserves data differences", () => {
+  assert.equal(stableDigest({ b: 2, a: { y: 2, x: 1 } }), stableDigest({ a: { x: 1, y: 2 }, b: 2 }));
+  assert.notEqual(stableDigest({ value: "A" }), stableDigest({ value: "B" }));
 });
 
 test("all exported diagnostics have an existing MongoDB document destination", () => {

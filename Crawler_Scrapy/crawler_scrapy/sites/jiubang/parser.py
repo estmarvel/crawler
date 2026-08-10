@@ -12,6 +12,6 @@ from crawler_scrapy.sites.jiubang.config import PLATFORM_NAME, WEB_BASE_URL
 class JiubangParser(HuaxinParser):
     """把玖邦 TWS 详情 JSON 转换为框架统一的八类公告字段。"""
 
+    parser_version = "jiubang-v7-identifiers"
     platform_name = PLATFORM_NAME
     web_base_url = WEB_BASE_URL
-

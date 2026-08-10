@@ -6,42 +6,18 @@ const { randomUUID } = require("node:crypto");
 const {
   assertMaxLength,
   booleanValue,
-  deduplicate,
+  compactDatabaseString,
+  iterateJsonNotices,
+  jsonNoticeFiles,
   nullableString,
   openStores,
   parseCommonArgs,
-  readJsonNotices,
   requiredString,
   resolveDataSources,
+  stableDigest,
   traceEnvelope,
 } = require("./lib/runtime");
-
-const SUBTYPE_TO_NOTICE_TYPE = Object.freeze({
-  zbjh: "招标计划",
-  zbys: "资格预审公告",
-  zbgg: "招标公告",
-  cggg: "采购公告",
-  hxr: "中标候选人公示",
-  cjhxr: "成交候选人公示",
-  dbhxr: "定标候选人公示",
-  zbjg: "中标结果公示",
-  cjgg: "成交公告",
-  gzjg: "更正结果公示",
-  zzgg: "终止公告",
-  htly: "合同与履约",
-});
-
-const FALLBACK_NOTICE_TYPES = Object.freeze({
-  PLAN: "招标计划",
-  PREQUALIFICATION: "资格预审公告",
-  TENDER: "招标公告",
-  CANDIDATE: "中标候选人公示",
-  FINAL_CANDIDATE: "定标候选人公示",
-  AWARD: "中标结果公示",
-  CORRECTION: "更正结果公示",
-  TERMINATION: "终止公告",
-  CONTRACT: "合同与履约",
-});
+const { resolveNoticeType } = require("./lib/business");
 
 const NON_EXTRACTION_FIELDS = new Set([
   "平台名称", "平台代码", "公告ID", "公告类型", "公告子类型", "公告标题",
@@ -57,28 +33,14 @@ function printHelp() {
 
 Options:
   --commit                 Write extraction details to MongoDB and indexes to MySQL.
-  --site=<site>            all, huaxin, jiubang, sxjm, or sxzwfw (default: all).
+  --site=<site>            all, sxjm, sxzwfw, bitbid, huaxin, or jiubang.
   --output-root=<path>     Crawler output root.
-  --api-root=<path>        ProjectRecommendationSystem/api directory.
+  --api-root=<path>        Project recommendation API directory.
   --help                   Show this help.
 
 Run import_raw_notices.js first. Existing project_notice and verification links
 are preserved when an extraction is updated.
 `);
-}
-
-function resolveNoticeType(source, context) {
-  const rawType = requiredString(source["公告类型"], "公告类型", context);
-  const fallbackType = FALLBACK_NOTICE_TYPES[rawType.toUpperCase()] || rawType;
-  // sxjm 偶尔把撤销/终止公告放在普通采购栏目。导出器已按完整标题将
-  // 公告类型纠正为 TERMINATION，此时应优先于栏目子类型，避免再次映射回采购公告。
-  if (rawType.toUpperCase() === "TERMINATION") return fallbackType;
-  const subtype = nullableString(source["公告子类型"]);
-  const subtypeSuffix = subtype?.toLowerCase().split(".").at(-1);
-  if (subtypeSuffix && SUBTYPE_TO_NOTICE_TYPE[subtypeSuffix]) {
-    return SUBTYPE_TO_NOTICE_TYPE[subtypeSuffix];
-  }
-  return fallbackType;
 }
 
 function buildExtractedFields(source) {
@@ -104,8 +66,10 @@ function buildEvidence(row) {
 function mapRecord(record) {
   const { source, context } = record;
   const noticeType = resolveNoticeType(source, context);
-  const extractionModel = requiredString(source["抽取方式"], "抽取方式", context);
-  const extractionVersion = requiredString(source["抽取版本"], "抽取版本", context);
+  const sourceExtractionModel = requiredString(source["抽取方式"], "抽取方式", context);
+  const sourceExtractionVersion = requiredString(source["抽取版本"], "抽取版本", context);
+  const extractionModel = compactDatabaseString(sourceExtractionModel, 64);
+  const extractionVersion = compactDatabaseString(sourceExtractionVersion, 32);
   const sourceNoticeId = requiredString(source["公告ID"], "公告ID", context);
   const trace = traceEnvelope(source, context);
   assertMaxLength(noticeType, 64, "notice_type", context);
@@ -119,10 +83,23 @@ function mapRecord(record) {
     noticeType,
     extractionModel,
     extractionVersion,
+    sourceExtractionModel,
+    sourceExtractionVersion,
     extractedFields: buildExtractedFields(source),
     isVerified: booleanValue(source["是否已核验"], "是否已核验", context),
     sourceTextSnippet: nullableString(source["公告正文"] || source["公告内容"])?.slice(0, 4000) || null,
   };
+}
+
+function recordDigest(row) {
+  return stableDigest({
+    noticeType: row.noticeType,
+    extractionModel: row.extractionModel,
+    extractionVersion: row.extractionVersion,
+    extractedFields: row.extractedFields,
+    isVerified: row.isVerified,
+    sourceTextSnippet: row.sourceTextSnippet,
+  });
 }
 
 function validObjectId(ObjectId, value) {
@@ -161,6 +138,8 @@ async function importOne(stores, row, parent) {
     sourceTextSnippet: row.sourceTextSnippet,
     extractionModel: row.extractionModel,
     extractionVersion: row.extractionVersion,
+    sourceExtractionModel: row.sourceExtractionModel,
+    sourceExtractionVersion: row.sourceExtractionVersion,
     promptVersion: null,
     inputDocumentUid: rawDocument?.documentUid || null,
     tokenUsage: null,
@@ -203,47 +182,57 @@ async function importOne(stores, row, parent) {
 async function main() {
   const options = parseCommonArgs(process.argv.slice(2));
   if (options.help) return printHelp();
-  const loaded = readJsonNotices(options.outputRoot, options.sites);
-  const mapped = loaded.records.map(mapRecord);
-  const deduplicated = deduplicate(
-    mapped,
-    (row) => `${row.site}\u0000${row.sourceNoticeId}\u0000${row.extractionModel}\u0000${row.extractionVersion}`,
-  );
   console.log(`Mode: ${options.commit ? "COMMIT" : "DRY RUN (no storage writes)"}`);
-  console.log(`Validated JSON files: ${loaded.jsonFileCount}`);
-  console.log(`Validated extractions: ${deduplicated.records.length}`);
-  console.log(`Duplicate JSON extractions skipped: ${deduplicated.duplicateCount}`);
+  console.log(`Validated JSON files: ${jsonNoticeFiles(options.outputRoot, options.sites).length}`);
   const typeCounts = new Map();
-  for (const row of deduplicated.records) typeCounts.set(row.noticeType, (typeCounts.get(row.noticeType) || 0) + 1);
-  for (const [type, count] of [...typeCounts].sort()) console.log(`  ${type}: ${count}`);
-  if (!options.commit) return console.log("Dry run complete. Add --commit to write MongoDB and MySQL.");
-
-  const stores = await openStores(options.apiRoot, { mongo: true });
+    const identities = new Map();
+  let duplicateCount = 0;
+  const stores = options.commit ? await openStores(options.apiRoot, { mongo: true }) : null;
   try {
-    const dataSources = await resolveDataSources(stores.prisma, options.sites);
+    const dataSources = stores ? await resolveDataSources(stores.prisma, options.sites) : null;
     const parentCache = new Map();
     const counts = { inserted: 0, updated: 0 };
-    for (let index = 0; index < deduplicated.records.length; index += 1) {
-      const row = deduplicated.records[index];
-      const dataSourceId = dataSources.get(row.site).id;
-      const parentKey = `${dataSourceId}\u0000${row.sourceNoticeId}`;
-      let parent = parentCache.get(parentKey);
-      if (!parent) {
-        parent = await stores.prisma.rawNotice.findFirst({
-          where: { dataSourceId, sourceNoticeId: row.sourceNoticeId },
-        });
-        if (!parent) throw new Error(`${row.context}: parent raw_notice not found; run import_raw_notices.js first`);
-        parentCache.set(parentKey, parent);
+    let processed = 0;
+    for await (const record of iterateJsonNotices(options.outputRoot, options.sites)) {
+      const row = mapRecord(record);
+      const identity = `${row.site}\u0000${row.sourceNoticeId}\u0000${row.extractionModel}\u0000${row.extractionVersion}`;
+      if (identities.has(identity)) {
+        duplicateCount += 1;
+        if (recordDigest(identities.get(identity)) !== recordDigest(row)) {
+          throw new Error(
+            `${row.context}: conflicting duplicate extraction for 公告ID=${row.sourceNoticeId}; `
+            + `first seen at ${identities.get(identity).context}`,
+          );
+        }
+        continue;
+      } else {
+        identities.set(identity, row);
+        typeCounts.set(row.noticeType, (typeCounts.get(row.noticeType) || 0) + 1);
       }
-      const result = await importOne(stores, row, parent);
-      counts[result] += 1;
-      if ((index + 1) % 100 === 0 || index + 1 === deduplicated.records.length) {
-        console.log(`  Processed ${index + 1}/${deduplicated.records.length}`);
+      if (stores) {
+        const dataSourceId = dataSources.get(row.site).id;
+        const parentKey = `${dataSourceId}\u0000${row.sourceNoticeId}`;
+        let parent = parentCache.get(parentKey);
+        if (!parent) {
+          parent = await stores.prisma.rawNotice.findFirst({
+            where: { dataSourceId, sourceNoticeId: row.sourceNoticeId },
+          });
+          if (!parent) throw new Error(`${row.context}: parent raw_notice not found; run import_raw_notices.js first`);
+          parentCache.set(parentKey, parent);
+        }
+        const result = await importOne(stores, row, parent);
+        counts[result] += 1;
       }
+      processed += 1;
+      if (processed % 100 === 0) console.log(`  Processed ${processed}`);
     }
+    console.log(`Validated extractions: ${identities.size}`);
+    console.log(`Duplicate JSON extractions encountered: ${duplicateCount}`);
+    for (const [type, count] of [...typeCounts].sort()) console.log(`  ${type}: ${count}`);
+    if (!stores) return console.log("Dry run complete. Add --commit to write MongoDB and MySQL.");
     console.log(`Commit completed: inserted=${counts.inserted}, updated=${counts.updated}.`);
   } finally {
-    await stores.close();
+    if (stores) await stores.close();
   }
 }
 
@@ -258,5 +247,6 @@ module.exports = {
   buildEvidence,
   buildExtractedFields,
   mapRecord,
+  recordDigest,
   resolveNoticeType,
 };

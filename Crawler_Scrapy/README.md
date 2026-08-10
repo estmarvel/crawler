@@ -1,7 +1,7 @@
 # Crawler_Scrapy
 
 公共 Scrapy 框架当前包含统一公告 Schema、HTML 快照和 CSV/JSON 输出，已适配华新、
-玖邦，以及山西省公共资源交易平台工程建设公告和政府采购更正/结果公告。
+玖邦、千极数采、山西交控，以及山西省公共资源交易平台工程建设公告和政府采购公告。
 
 ## 运行环境
 
@@ -42,20 +42,30 @@ cd /home/intsig/Crawler_Scrapy
 ./run_sxzwfw.sh --phase notices --sections zc_gz,zc_jg --max-records 5
 ```
 
-## 五站统一运行入口
+## 九站统一运行入口
 
 每个网站只保留一个入口；同一命令默认先采公告/快照，再独立下载附件：
 
 完整参数、运行场景、续跑和问题排查见
-[`crawler_scrapy/docs/五站统一运行说明.md`](crawler_scrapy/docs/五站统一运行说明.md)。
+[`crawler_scrapy/docs/五站统一运行说明.md`](crawler_scrapy/docs/五站统一运行说明.md)；
+各站接口、栏目和字段提取细节见
+[`crawler_scrapy/docs/五站爬虫详细实现说明.md`](crawler_scrapy/docs/五站爬虫详细实现说明.md)。
+山西交控的公开/登录/CA 边界、接口和字段规则见
+[`crawler_scrapy/docs/sxjkzcpt/README.md`](crawler_scrapy/docs/sxjkzcpt/README.md)。
+山西招投标网八类公告、PDF 正文、快照和附件策略见
+[`crawler_scrapy/docs/sxbid/README.md`](crawler_scrapy/docs/sxbid/README.md)。
 
 ```bash
 cd /home/intsig/Crawler_Scrapy
 ./run_sxjm.sh --days 180
 ./run_sxzwfw.sh --days 180
-./run_bitbid.sh --days 180
+./run_bitbid.sh --phase notices --days 180
 ./run_huaxin.sh --days 180
 ./run_jiubang.sh --days 180
+./run_qianji.sh --days 180
+./run_sxjkzcpt.sh --days 180
+./run_trade365.sh --days 180
+./run_sxbid.sh --days 180
 ```
 
 补采源站现存的全部历史公告时使用 `--all`，例如：
@@ -90,6 +100,10 @@ cd /home/intsig/Crawler_Scrapy
 
 - 华新 JSON/CSV/附件：`new_output/huaxin/`
 - 玖邦 JSON/CSV/附件：`new_output/jiubang/`
+- 千极数采 JSON/CSV/快照/附件：`new_output/qianji/`
+- 山西交控 JSON/CSV/快照/附件：`new_output/sxjkzcpt/`
+- 中招联合山西 JSON/CSV/快照/附件：`new_output/trade365/`
+- 山西招投标网 JSON/CSV/快照/附件：`new_output/sxbid/`
 - 单站实时日志：`new_output/<网站代码>/logs/`
 
 固定代理地址允许由环境变量覆盖；认证信息只从 `HUAXIN_PROXY_USERNAME`、
@@ -208,11 +222,12 @@ MySQL 只保留查询索引和文档 ID，MinIO 继续只保存附件二进制�
 
 ## 服务器直连保护与代理备用模式
 
-SXJM、SXZWFW、Bitbid 默认使用 `direct`；Huaxin、Jiubang 默认使用 `static` 固定代理。
-统一入口启用并发 2、3~5 秒批次间隔、AutoThrottle 和
+SXJM、SXZWFW、Bitbid、Huaxin、Jiubang、Qianji、SXJKZCPT、TRADE365、SXBID
+均默认使用 `direct` 服务器直连。
+统一入口启用并发 2、3~5 秒批次间隔、每 400 个响应冷却 180~300 秒、AutoThrottle 和
 `DirectAccessGuardMiddleware`。第一次连续出现 403/429 就主动关闭 Spider。
 
-固定代理凭据只从环境读取；交互终端缺少凭据时会安全提示输入：
+如需人工切换固定代理，凭据只从环境读取；交互终端缺少凭据时会安全提示输入：
 
 ```bash
 export HUAXIN_PROXY_USERNAME='...'

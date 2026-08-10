@@ -622,6 +622,46 @@ class HuaxinParserTest(unittest.TestCase):
         self.assertEqual(data["项目编号"], "")
         self.assertEqual(data["招标编号"], "HXZB-GC20260613")
 
+    def test_labelled_identifiers_stop_before_same_line_prose(self):
+        detail = {
+            "annClassification": "1",
+            "annTitle": "同段正文编号边界测试招标公告",
+            "annContent": """
+                <p>某工程（招标项目编号：E1401005107101182001)资金来源为财政资金，招标人为甲公司。</p>
+                <p>2.2 招标编号：SXZS招（2024）07-15；</p>
+            """,
+        }
+
+        _, _, data, _ = HuaxinParser.parse("zbgg_zys", detail)
+
+        self.assertEqual(data["项目编号"], "E1401005107101182001")
+        self.assertEqual(data["招标编号"], "SXZS招（2024）07-15")
+
+    def test_repeated_project_number_label_is_removed(self):
+        detail = {
+            "annClassification": "1",
+            "annTitle": "重复标签测试招标公告",
+            "annContent": (
+                "某工程（招标项目编号：招标项目编号："
+                "E1401005129000015008）,项目资金来源为自筹资金。"
+            ),
+        }
+
+        _, _, data, _ = HuaxinParser.parse("zbgg_zys", detail)
+
+        self.assertEqual(data["项目编号"], "E1401005129000015008")
+
+    def test_identifier_keeps_its_own_balanced_parentheses(self):
+        detail = {
+            "annClassification": "1",
+            "annTitle": "括号编号测试招标公告",
+            "annContent": "招标编号：晋招（2024）；",
+        }
+
+        _, _, data, _ = HuaxinParser.parse("zbgg_zys", detail)
+
+        self.assertEqual(data["招标编号"], "晋招（2024）")
+
     def test_result_detection_prefers_title_semantics(self):
         correction = {
             "annId": "3",

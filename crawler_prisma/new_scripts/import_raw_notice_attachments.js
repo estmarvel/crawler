@@ -9,11 +9,12 @@ const {
   assertMaxLength,
   bigintValue,
   deduplicate,
+  iterateJsonNotices,
+  jsonNoticeFiles,
   nullableString,
   openStores,
   parseCommonArgs,
   parseCrawlerDate,
-  readJsonNotices,
   requiredString,
   resolveDataSources,
   safeObjectName,
@@ -25,9 +26,9 @@ function printHelp() {
 
 Options:
   --commit                 Upload files to MinIO and write MySQL metadata.
-  --site=<site>            all, huaxin, jiubang, sxjm, or sxzwfw (default: all).
+  --site=<site>            all, sxjm, sxzwfw, bitbid, huaxin, or jiubang.
   --output-root=<path>     Crawler output root.
-  --api-root=<path>        ProjectRecommendationSystem/api directory.
+  --api-root=<path>        Project recommendation API directory.
   --allow-missing-files    Keep metadata with storage_provider=SOURCE when a
                            JSON attachment has no readable local file.
   --help                   Show this help.
@@ -117,6 +118,10 @@ function mapAttachments(loaded, outputRoot, allowMissingFiles) {
     });
   }
   return deduplicate(rows, (row) => `${row.site}\u0000${row.sourceNoticeId}\u0000${identity(row)}`);
+}
+
+function mapRecordAttachments(record, outputRoot, allowMissingFiles) {
+  return mapAttachments({ records: [record] }, outputRoot, allowMissingFiles).records;
 }
 
 function existingIdentityMatches(existing, row) {
@@ -213,46 +218,55 @@ async function importOne(stores, row, parent) {
 async function main() {
   const options = parseCommonArgs(process.argv.slice(2), { allowMissingFiles: false });
   if (options.help) return printHelp();
-  const loaded = readJsonNotices(options.outputRoot, options.sites);
-  const mapped = mapAttachments(loaded, options.outputRoot, options.allowMissingFiles);
-
   console.log(`Mode: ${options.commit ? "COMMIT" : "DRY RUN (no storage writes)"}`);
-  console.log(`Validated JSON files: ${loaded.jsonFileCount}`);
-  console.log(`Validated attachments: ${mapped.records.length}`);
-  console.log(`Duplicate JSON attachments skipped: ${mapped.duplicateCount}`);
-  console.log(`Files ready for MinIO: ${mapped.records.filter((row) => row.fileExists).length}`);
-  console.log(`Metadata-only attachments: ${mapped.records.filter((row) => !row.fileExists).length}`);
-  if (!options.commit) return console.log("Dry run complete. Add --commit to upload MinIO objects and write MySQL metadata.");
-
-  const stores = await openStores(options.apiRoot, { minio: true });
+  console.log(`Validated JSON files: ${jsonNoticeFiles(options.outputRoot, options.sites).length}`);
+  const stores = options.commit ? await openStores(options.apiRoot, { minio: true }) : null;
   try {
-    if (!await stores.minio.bucketExists(stores.bucketName)) {
+    if (stores && !await stores.minio.bucketExists(stores.bucketName)) {
       await stores.minio.makeBucket(stores.bucketName);
     }
-    const dataSources = await resolveDataSources(stores.prisma, options.sites);
+    const dataSources = stores ? await resolveDataSources(stores.prisma, options.sites) : null;
     const parentCache = new Map();
     const counts = { inserted: 0, updated: 0 };
-    for (let index = 0; index < mapped.records.length; index += 1) {
-      const row = mapped.records[index];
-      const dataSourceId = dataSources.get(row.site).id;
-      const parentKey = `${dataSourceId}\u0000${row.sourceNoticeId}`;
-      let parent = parentCache.get(parentKey);
-      if (!parent) {
-        parent = await stores.prisma.rawNotice.findFirst({
-          where: { dataSourceId, sourceNoticeId: row.sourceNoticeId },
-        });
-        if (!parent) throw new Error(`${row.context}: parent raw_notice not found; run import_raw_notices.js first`);
-        parentCache.set(parentKey, parent);
-      }
-      const result = await importOne(stores, row, parent);
-      counts[result] += 1;
-      if ((index + 1) % 50 === 0 || index + 1 === mapped.records.length) {
-        console.log(`  Processed ${index + 1}/${mapped.records.length}`);
+    const identities = new Set();
+    let duplicateCount = 0;
+    let fileCount = 0;
+    let metadataOnlyCount = 0;
+    let processed = 0;
+    for await (const record of iterateJsonNotices(options.outputRoot, options.sites)) {
+      const rows = mapRecordAttachments(record, options.outputRoot, options.allowMissingFiles);
+      for (const row of rows) {
+        const key = `${row.site}\u0000${row.sourceNoticeId}\u0000${identity(row)}`;
+        if (identities.has(key)) duplicateCount += 1;
+        else identities.add(key);
+        if (row.fileExists) fileCount += 1;
+        else metadataOnlyCount += 1;
+        if (stores) {
+          const dataSourceId = dataSources.get(row.site).id;
+          const parentKey = `${dataSourceId}\u0000${row.sourceNoticeId}`;
+          let parent = parentCache.get(parentKey);
+          if (!parent) {
+            parent = await stores.prisma.rawNotice.findFirst({
+              where: { dataSourceId, sourceNoticeId: row.sourceNoticeId },
+            });
+            if (!parent) throw new Error(`${row.context}: parent raw_notice not found; run import_raw_notices.js first`);
+            parentCache.set(parentKey, parent);
+          }
+          const result = await importOne(stores, row, parent);
+          counts[result] += 1;
+        }
+        processed += 1;
+        if (processed % 50 === 0) console.log(`  Processed ${processed}`);
       }
     }
+    console.log(`Validated attachments: ${identities.size}`);
+    console.log(`Duplicate JSON attachments encountered: ${duplicateCount}`);
+    console.log(`Files ready for MinIO: ${fileCount}`);
+    console.log(`Metadata-only attachments: ${metadataOnlyCount}`);
+    if (!stores) return console.log("Dry run complete. Add --commit to upload MinIO objects and write MySQL metadata.");
     console.log(`Commit completed: inserted=${counts.inserted}, updated=${counts.updated}.`);
   } finally {
-    await stores.close();
+    if (stores) await stores.close();
   }
 }
 

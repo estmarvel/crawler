@@ -59,7 +59,8 @@ class SxzwfwSpider(BaseNoticeSpider):
         "NOTICE_SNAPSHOT_REQUIRED": True,
         "NOTICE_ATTACHMENT_DOWNLOAD_ENABLED": True,
         "NOTICE_AI_INCLUDE_OPTIONAL_FIELDS": True,
-        # 默认出口仍是固定认证代理；天启配置保留为手动备用。
+        # 统一入口默认使用受保护直连；以下天启配置仅保留为手动备用，
+        # update_settings 会按所选出口模式禁用不需要的代理中间件。
         "TIANQI_PROXY_ENABLED": True,
         "TIANQI_PROXY_REQUIRED": True,
         "DOWNLOADER_MIDDLEWARES": {
@@ -378,7 +379,8 @@ class SxzwfwSpider(BaseNoticeSpider):
         page: int,
         window_start: date,
         window_end: date,
-    ):
+    ) -> list[Request]:
+        requests: list[Request] = []
         records = SxzwfwParser.parse_list_records(response.body)
         total = SxzwfwParser.list_total(response.body)
         total_pages = pages_for_total(total)
@@ -423,7 +425,7 @@ class SxzwfwSpider(BaseNoticeSpider):
                 window_end,
                 page,
             )
-            return
+            return requests
 
         all_before_window = True
         for record in records:
@@ -457,19 +459,21 @@ class SxzwfwSpider(BaseNoticeSpider):
             record_with_meta = dict(record)
             record_with_meta["_crawler_list_fingerprint"] = list_fingerprint
             record_with_meta["_crawler_list_trace"] = list_trace
-            yield Request(
-                detail_url,
-                headers={"Referer": response.url},
-                callback=self.parse_detail,
-                errback=self.on_request_error,
-                cb_kwargs={
-                    "section": section,
-                    "notice_id": notice_id,
-                    "list_record": record_with_meta,
-                },
-                # 跨运行事实来源是已成功导出的公告索引。不要让 JOBDIR 把已发出
-                # 但尚未来得及导出的详情永久标记为完成；中断后必须可以重取。
-                dont_filter=True,
+            requests.append(
+                Request(
+                    detail_url,
+                    headers={"Referer": response.url},
+                    callback=self.parse_detail,
+                    errback=self.on_request_error,
+                    cb_kwargs={
+                        "section": section,
+                        "notice_id": notice_id,
+                        "list_record": record_with_meta,
+                    },
+                    # 跨运行事实来源是已成功导出的公告索引。不要让 JOBDIR 把已发出
+                    # 但尚未来得及导出的详情永久标记为完成；中断后必须可以重取。
+                    dont_filter=True,
+                )
             )
 
         has_next = (
@@ -482,7 +486,9 @@ class SxzwfwSpider(BaseNoticeSpider):
             )
         )
         if has_next:
-            yield self._list_request(section, page + 1, window_start, window_end)
+            requests.append(
+                self._list_request(section, page + 1, window_start, window_end)
+            )
         else:
             if all_before_window:
                 reason = "time_boundary_reached"
@@ -502,6 +508,7 @@ class SxzwfwSpider(BaseNoticeSpider):
                 total or "unknown",
                 total_pages or "unknown",
             )
+        return requests
 
     def parse_detail(
         self,

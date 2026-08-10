@@ -23,6 +23,123 @@ def detail_html(title: str, body: str, extra: str = "") -> bytes:
 
 
 class SxzwfwParserTest(unittest.TestCase):
+    def test_identifiers_prefer_transaction_project_code_and_drop_prose(self):
+        page = detail_html(
+            "产业园建设项目招标公告",
+            """
+            <p>项目编号：ZLZX招【2026】0487号</p>
+            <p>（招标项目编号：D3201150734fdpsb1v19）由太原市行政审批服务管理局批准建设</p>
+            <p>招标编号：RC2026F012</p>
+            """,
+        )
+        parsed = SxzwfwParser.parse(
+            "zbgg_zys", page, {"notice_id": "clean-identifiers-1"},
+            "https://prec.sxzwfw.gov.cn/jyxxgczb/clean-identifiers-1.jhtml",
+        )
+
+        self.assertEqual(parsed.data["项目编号"], "D3201150734fdpsb1v19")
+        self.assertEqual(parsed.data["招标编号"], "RC2026F012")
+        self.assertEqual(
+            parsed.data["项目编号/招标编号"],
+            "D3201150734fdpsb1v19；ZLZX招【2026】0487号；RC2026F012",
+        )
+
+    def test_identifiers_stop_before_approval_text_and_keep_balanced_brackets(self):
+        page = detail_html(
+            "生活污水治理项目招标公告",
+            """
+            <p>投资项目统一代码：2502-140109-89-01-287745批准建设</p>
+            <p>项目编号：E1401000267024234001001）由太原市行政审批服务管理局批准</p>
+            <p>招标编号：晋新招字（2026）第043号</p>
+            """,
+        )
+        parsed = SxzwfwParser.parse(
+            "zbgg_zys", page, {"notice_id": "clean-identifiers-2"},
+            "https://prec.sxzwfw.gov.cn/jyxxgczb/clean-identifiers-2.jhtml",
+        )
+
+        self.assertEqual(parsed.data["项目编号"], "2502-140109-89-01-287745")
+        self.assertEqual(parsed.data["招标编号"], "晋新招字（2026）第043号")
+        self.assertNotIn("批准", parsed.data["项目编号/招标编号"])
+        self.assertNotIn("由太原市", parsed.data["项目编号/招标编号"])
+
+    def test_wrapped_identifier_uses_complete_value_instead_of_short_fragment(self):
+        page = detail_html(
+            "国土绿化项目招标公告",
+            """
+            <p>(项目编号：2026GC010064)</p>
+            <p>本项目（招标项目编号：202<br/>6GC010064）,已批准建设。</p>
+            """,
+        )
+        parsed = SxzwfwParser.parse(
+            "zbgg_zys", page, {"notice_id": "wrapped-identifier"},
+            "https://prec.sxzwfw.gov.cn/jyxxgczb/wrapped-identifier.jhtml",
+        )
+
+        self.assertEqual(parsed.data["项目编号"], "2026GC010064")
+        self.assertEqual(parsed.data["项目编号/招标编号"], "2026GC010064")
+
+    def test_placeholder_identifier_is_treated_as_missing(self):
+        page = detail_html(
+            "占位编号项目招标公告",
+            "<p>项目编号：null</p><p>招标编号：无</p>",
+        )
+        parsed = SxzwfwParser.parse(
+            "zbgg_zys", page, {"notice_id": "placeholder-identifier"},
+            "https://prec.sxzwfw.gov.cn/jyxxgczb/placeholder-identifier.jhtml",
+        )
+
+        self.assertEqual(parsed.data["项目编号"], "")
+        self.assertEqual(parsed.data["招标编号"], "")
+
+    def test_identifiers_stop_at_inline_numbered_fields_and_nested_labels(self):
+        page = detail_html(
+            "字段粘连项目招标公告",
+            """
+            <p>备案项目代码:2509-140602-89-05-864976 项目总投资为：831.110万元</p>
+            <p>项目编号：E1405000297A02059001001 2.3 项目地址：泽州县</p>
+            <p>项目编号：141001-20240913-SJ003-02 招标编号：GC141000202400657001</p>
+            """,
+        )
+        parsed = SxzwfwParser.parse(
+            "zbgg_zys", page, {"notice_id": "inline-boundaries"},
+            "https://prec.sxzwfw.gov.cn/jyxxgczb/inline-boundaries.jhtml",
+        )
+        self.assertEqual(parsed.data["项目编号"], "2509-140602-89-05-864976")
+        self.assertEqual(parsed.data["招标编号"], "GC141000202400657001")
+
+    def test_empty_and_unbalanced_identifiers_are_missing(self):
+        page = detail_html(
+            "空编号项目招标公告",
+            """
+            <p>项目编号：</p><p>招标控制总价：201.2702万元</p>
+            <p>招标编号：ZXX-GC-020（2024</p>
+            <p>招标项目编号：M1401000155207882001</p>
+            """,
+        )
+        parsed = SxzwfwParser.parse(
+            "zbgg_zys", page, {"notice_id": "empty-unbalanced"},
+            "https://prec.sxzwfw.gov.cn/jyxxgczb/empty-unbalanced.jhtml",
+        )
+        self.assertEqual(parsed.data["项目编号"], "M1401000155207882001")
+        self.assertEqual(parsed.data["招标编号"], "")
+
+    def test_project_and_tender_amounts_stop_before_following_prose(self):
+        page = detail_html(
+            "工程质量检测招标公告",
+            """
+            <p>项目总投资：40700.22万元，本次招标：根据收费标准的65%计取。</p>
+            <p>本次招标金额约：127万元。</p>
+            """,
+        )
+        parsed = SxzwfwParser.parse(
+            "zbgg_zys", page, {"notice_id": "clean-amounts"},
+            "https://prec.sxzwfw.gov.cn/jyxxgczb/clean-amounts.jhtml",
+        )
+
+        self.assertEqual(parsed.data["项目总投资/估算金额"], Decimal("407002200.00"))
+        self.assertEqual(parsed.data["招标金额"], Decimal("1270000.00"))
+
     def test_saved_list_page_is_parsed_without_browser(self):
         page = (DOCS / "山西省公共资源交易平台列表页.html").read_bytes()
         records = SxzwfwParser.parse_list_records(page)

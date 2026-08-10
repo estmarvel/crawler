@@ -44,6 +44,9 @@ Order:
   1. raw notice metadata -> MySQL; payload/text -> MongoDB
   2. attachment binaries -> MinIO; object metadata -> MySQL
   3. extraction metadata -> MySQL; extracted fields -> MongoDB
+  4. project rows -> MySQL (项目编号 > 招标编号 > 项目名称)
+  5. project notices and extraction links -> MySQL/MongoDB
+  6. project attachment references -> MySQL
 
 The default is a dry run. Each stage is idempotent and can be rerun.
 `);
@@ -57,6 +60,9 @@ The default is a dry run. Each stage is idempotent and can be rerun.
     args.includes("--allow-missing-files") ? [...commonArgs, "--allow-missing-files"] : commonArgs,
   );
   run("import_notice_extractions.js", commonArgs);
+  run("import_projects.js", commonArgs);
+  run("import_project_notices.js", commonArgs);
+  run("import_project_notice_attachments.js", commonArgs);
 }
 
 try {

@@ -420,6 +420,69 @@ def _project_numbers(detail: Mapping[str, Any], text: str) -> str:
     return "；".join(values)
 
 
+def _clean_identifier_value(value: Any, labels: tuple[str, ...] = ()) -> str:
+    """清洗标签后面的单个编号，并在正文开始处可靠停止。
+
+    TWS 公告常把编号和“资金来源/招标人”等正文放在同一段，甚至出现
+    ``招标项目编号：招标项目编号：E...``。不能简单读取整行，也不能直接
+    遇到右括号就截断，因为代理编号自身可能包含 ``（2024）``。
+    """
+
+    result = re.sub(r"[\t\r\n]+", " ", _string(value)).strip()
+    if not result:
+        return ""
+
+    if labels:
+        label_pattern = "|".join(
+            re.escape(label) for label in sorted(labels, key=len, reverse=True)
+        )
+        repeated_label = re.compile(
+            rf"^\s*(?:{label_pattern})\s*[：:]\s*",
+        )
+        while repeated_label.match(result):
+            result = repeated_label.sub("", result, count=1).strip()
+
+    # 在未配对的右括号或顶层标点处停止；配对括号属于编号本身，例如
+    # ``SXZS招（2024）07-15``，必须保留。
+    closing_for = {"(": ")", "（": "）", "[": "]", "【": "】"}
+    closing = set(closing_for.values())
+    stack: list[str] = []
+    kept: list[str] = []
+    for character in result:
+        if character in closing_for:
+            stack.append(closing_for[character])
+            kept.append(character)
+            continue
+        if character in closing:
+            if not stack or stack[-1] != character:
+                break
+            stack.pop()
+            kept.append(character)
+            continue
+        if not stack and character in "，,。；;":
+            break
+        kept.append(character)
+    result = "".join(kept).strip()
+
+    # 少数模板没有括号或标点分隔，直接紧跟说明性正文。
+    prose_stops = (
+        "项目资金来源", "资金来源", "招标人为", "采购人为", "已由",
+        "本项目已", "经评标委员会", "经评审", "现将", "现对",
+    )
+    stop_indexes = [result.find(marker) for marker in prose_stops if marker in result]
+    if stop_indexes:
+        result = result[:min(stop_indexes)]
+
+    # 编号中的排版空格没有业务意义；末尾的冒号、顿号等也不属于编号。
+    result = re.sub(r"\s+", "", result)
+    result = result.strip("：:，,。；;、")
+    for opening, ending in (("(", ")"), ("（", "）"), ("[", "]"), ("【", "】")):
+        if result.startswith(opening) and result.endswith(ending):
+            result = result[1:-1].strip("：:，,。；;、")
+            break
+    return result
+
+
 def _labelled_identifier(text: str, labels: tuple[str, ...]) -> str:
     """只接受有明确语义标签的编号，防止项目号和招标号相互污染。"""
 
@@ -434,10 +497,7 @@ def _labelled_identifier(text: str, labels: tuple[str, ...]) -> str:
                 rf"{re.escape(label)}\s*[：:]\s*([^，,。；;\n]+)", text
             )
         if match:
-            value = match.group(1).strip()
-            if value.endswith(("）", ")")):
-                value = value[:-1].rstrip()
-            return value
+            return _clean_identifier_value(match.group(1), labels)
     return ""
 
 
@@ -996,6 +1056,7 @@ def _attachments(detail: Mapping[str, Any]) -> list[dict[str, Any]]:
 class HuaxinParser:
     """把华新详情 JSON 转换为框架的八类公告字段。"""
 
+    parser_version = "huaxin-v12-identifiers"
     platform_name = PLATFORM_NAME
     web_base_url = WEB_BASE_URL
 
@@ -1108,15 +1169,19 @@ class HuaxinParser:
                 or detail.get("projectName")
             )
         if "项目编号" in data:
+            project_labels = (
+                "招标项目编号", "项目编号", "投资项目统一代码", "项目代码",
+            )
             data["项目编号"] = _labelled_identifier(
                 text,
-                ("招标项目编号", "项目编号", "投资项目统一代码", "项目代码"),
-            ) or _string(detail.get("diyProjectNo"))
+                project_labels,
+            ) or _clean_identifier_value(detail.get("diyProjectNo"), project_labels)
         if "招标编号" in data:
+            tender_labels = ("招标编号", "采购编号", "代理编号")
             data["招标编号"] = _labelled_identifier(
                 text,
-                ("招标编号", "采购编号", "代理编号"),
-            ) or _string(detail.get("purDiyCode"))
+                tender_labels,
+            ) or _clean_identifier_value(detail.get("purDiyCode"), tender_labels)
         if "所属行业" in data:
             data["所属行业"] = _string(detail.get("industryName"))
         if "组织形式" in data:

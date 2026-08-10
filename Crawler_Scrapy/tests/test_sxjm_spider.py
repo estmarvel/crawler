@@ -90,6 +90,20 @@ def test_parser_maps_tender_notice_and_attachment():
     assert attachments[0]["file_url"].endswith("/zcpt/2026-07-21/example.pdf")
 
 
+def test_parser_keeps_complete_bracket_identifier_and_rejects_prefix_only_code():
+    detail = _detail()
+    detail["content"] = "<p>项目编号：fxkynghw[2025]002</p>"
+    detail["tender_number"] = "fxkynghw"
+    _, _, data, _ = SxjmParser.parse("jycg", "cggg", detail)
+    assert data["项目编号"] == "fxkynghw[2025]002"
+    assert data["招标编号"] == ""
+
+    detail["content"] = "<p>本公告未披露编号</p>"
+    detail["invest_project_code"] = "DLXCGQT"
+    _, _, data, _ = SxjmParser.parse("jycg", "cggg", detail)
+    assert data["项目编号"] == ""
+
+
 def test_source_types_remain_distinct_while_reusing_framework_schemas():
     cases = {
         "zbgg": ("招标公告", "招标公告"),

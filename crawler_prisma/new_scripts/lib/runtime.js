@@ -2,17 +2,22 @@
 
 const fs = require("node:fs");
 const path = require("node:path");
+const { createHash } = require("node:crypto");
 
 const NEW_SCRIPTS_ROOT = path.resolve(__dirname, "..");
 const CRAWLER_PRISMA_ROOT = path.resolve(NEW_SCRIPTS_ROOT, "..");
-const DEFAULT_OUTPUT_ROOT = path.resolve(CRAWLER_PRISMA_ROOT, "../Crawler_Scrapy/output");
-const DEFAULT_API_ROOT = "/home/intsig/ProjectRecommendationSystem/api";
+const DEFAULT_OUTPUT_ROOT = path.resolve(CRAWLER_PRISMA_ROOT, "../Crawler_Scrapy/new_output");
+const DEFAULT_API_ROOT = path.resolve(
+  CRAWLER_PRISMA_ROOT,
+  "../recommendation/project-recommendation-system/api",
+);
 
 const SITE_CONFIG = Object.freeze({
   huaxin: Object.freeze({ preferredDataSourceId: 6, shortCodes: ["huaxin", "ygcgpt"] }),
-  jiubang: Object.freeze({ preferredDataSourceId: 14, shortCodes: ["jiubang"] }),
-  sxjm: Object.freeze({ preferredDataSourceId: null, shortCodes: ["sxjm"] }),
-  sxzwfw: Object.freeze({ preferredDataSourceId: null, shortCodes: ["sxzwfw"] }),
+  jiubang: Object.freeze({ preferredDataSourceId: 14, shortCodes: ["jiubang", "bjjbkj"] }),
+  sxjm: Object.freeze({ preferredDataSourceId: 7, shortCodes: ["sxjm", "sxccdzzcpt"] }),
+  sxzwfw: Object.freeze({ preferredDataSourceId: 21, shortCodes: ["sxzwfw"] }),
+  bitbid: Object.freeze({ preferredDataSourceId: 12, shortCodes: ["bitbid"] }),
 });
 
 function nullableString(value) {
@@ -31,6 +36,35 @@ function assertMaxLength(value, max, field, context) {
   if (value !== null && [...value].length > max) {
     throw new Error(`${context}: ${field} exceeds ${max} characters`);
   }
+}
+
+function compactDatabaseString(value, max) {
+  const text = nullableString(value);
+  if (text === null || [...text].length <= max) return text;
+  const digest = createHash("sha256").update(text).digest("hex").slice(0, 8);
+  return `${[...text].slice(0, max - digest.length - 1).join("")}-${digest}`;
+}
+
+function stableJsonValue(value) {
+  if (value === undefined) return null;
+  if (value === null || typeof value !== "object") {
+    if (typeof value === "bigint") return value.toString();
+    return value;
+  }
+  if (value instanceof Date) return value.toISOString();
+  if (Array.isArray(value)) return value.map(stableJsonValue);
+  return Object.fromEntries(
+    Object.keys(value)
+      .sort()
+      .filter((key) => value[key] !== undefined)
+      .map((key) => [key, stableJsonValue(value[key])]),
+  );
+}
+
+function stableDigest(value) {
+  return createHash("sha256")
+    .update(JSON.stringify(stableJsonValue(value)))
+    .digest("hex");
 }
 
 function booleanValue(value, field, context) {
@@ -162,6 +196,103 @@ function readJsonNotices(outputRoot, sites) {
   return { records, jsonFileCount };
 }
 
+function jsonNoticeFiles(outputRoot, sites) {
+  const files = [];
+  for (const site of sites) {
+    const jsonDirectory = path.join(outputRoot, site, "json");
+    if (!fs.existsSync(jsonDirectory)) {
+      throw new Error(`JSON directory does not exist: ${jsonDirectory}`);
+    }
+    const names = fs.readdirSync(jsonDirectory, { withFileTypes: true })
+      .filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith(".json"))
+      .map((entry) => entry.name)
+      .sort((left, right) => left.localeCompare(right, "zh-CN"));
+    if (names.length === 0) throw new Error(`No JSON files found in: ${jsonDirectory}`);
+    for (const fileName of names) files.push({ site, fileName, filePath: path.join(jsonDirectory, fileName) });
+  }
+  return files;
+}
+
+async function* streamJsonArray(filePath) {
+  const stream = fs.createReadStream(filePath, { encoding: "utf8", highWaterMark: 1024 * 1024 });
+  let opened = false;
+  let closed = false;
+  let collecting = false;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  let current = "";
+
+  for await (const chunk of stream) {
+    for (const character of chunk) {
+      if (!opened) {
+        if (/\s/u.test(character)) continue;
+        if (character !== "[") throw new Error(`${filePath}: top-level JSON must be an array`);
+        opened = true;
+        continue;
+      }
+      if (!collecting) {
+        if (/\s/u.test(character) || character === ",") continue;
+        if (character === "]") {
+          closed = true;
+          continue;
+        }
+        if (character !== "{") throw new Error(`${filePath}: array entries must be objects`);
+        collecting = true;
+        depth = 1;
+        inString = false;
+        escaped = false;
+        current = "{";
+        continue;
+      }
+
+      current += character;
+      if (inString) {
+        if (escaped) escaped = false;
+        else if (character === "\\") escaped = true;
+        else if (character === '"') inString = false;
+        continue;
+      }
+      if (character === '"') {
+        inString = true;
+        continue;
+      }
+      if (character === "{" || character === "[") depth += 1;
+      else if (character === "}" || character === "]") depth -= 1;
+      if (depth === 0) {
+        let value;
+        try {
+          value = JSON.parse(current);
+        } catch (error) {
+          throw new Error(`${filePath}: cannot parse array entry: ${error.message}`);
+        }
+        yield value;
+        collecting = false;
+        current = "";
+      }
+    }
+  }
+  if (!opened || collecting || !closed) throw new Error(`${filePath}: incomplete JSON array`);
+}
+
+async function* iterateJsonNotices(outputRoot, sites) {
+  for (const file of jsonNoticeFiles(outputRoot, sites)) {
+    let index = 0;
+    for await (const source of streamJsonArray(file.filePath)) {
+      const context = `${file.site}/${file.fileName} item ${index + 1}`;
+      if (source === null || typeof source !== "object" || Array.isArray(source)) {
+        throw new Error(`${context}: expected an object`);
+      }
+      const platformCode = requiredString(source["平台代码"], "平台代码", context).toLowerCase();
+      if (platformCode !== file.site) {
+        throw new Error(`${context}: 平台代码 is ${platformCode}, expected ${file.site}`);
+      }
+      yield { ...file, index, context, source };
+      index += 1;
+    }
+  }
+}
+
 function parseCommonArgs(argv, extra = {}) {
   const options = {
     commit: false,
@@ -201,8 +332,15 @@ function parseCommonArgs(argv, extra = {}) {
 }
 
 function loadApiEnvironment(apiRoot) {
-  const envPath = path.join(apiRoot, ".env");
-  if (!fs.existsSync(envPath)) throw new Error(`API environment file does not exist: ${envPath}`);
+  const candidates = [
+    process.env.PROJECT_RECOMMENDATION_ENV,
+    path.join(apiRoot, ".env"),
+    path.resolve(apiRoot, "../.env.production"),
+  ].filter(Boolean);
+  const envPath = candidates.find((candidate) => fs.existsSync(candidate));
+  if (!envPath) {
+    throw new Error(`API environment file does not exist; checked: ${candidates.join(", ")}`);
+  }
   if (typeof process.loadEnvFile !== "function") {
     throw new Error("Node.js 20.12+ is required because process.loadEnvFile() is unavailable");
   }
@@ -220,7 +358,7 @@ function requireFromApi(apiRoot, packageName) {
   }
 }
 
-async function openStores(apiRoot, requirements = {}) {
+async function openStores(apiRoot = DEFAULT_API_ROOT, requirements = {}) {
   loadApiEnvironment(apiRoot);
   const { PrismaClient } = requireFromApi(apiRoot, "@prisma/client");
   const prisma = new PrismaClient();
@@ -270,6 +408,11 @@ async function resolveDataSources(prisma, sites) {
     let row = null;
     if (config.preferredDataSourceId !== null) {
       row = await prisma.dataSource.findUnique({ where: { id: config.preferredDataSourceId } });
+      if (row && !config.shortCodes.includes(String(row.shortCode).toLowerCase())) {
+        throw new Error(
+          `data_source.id=${config.preferredDataSourceId} has short_code=${row.shortCode}, expected one of ${config.shortCodes.join(",")}`,
+        );
+      }
     }
     if (!row) {
       row = await prisma.dataSource.findFirst({ where: { shortCode: { in: config.shortCodes } } });
@@ -302,7 +445,10 @@ module.exports = {
   assertMaxLength,
   bigintValue,
   booleanValue,
+  compactDatabaseString,
   deduplicate,
+  iterateJsonNotices,
+  jsonNoticeFiles,
   nullableString,
   openStores,
   parseCommonArgs,
@@ -311,5 +457,7 @@ module.exports = {
   requiredString,
   resolveDataSources,
   safeObjectName,
+  stableDigest,
+  streamJsonArray,
   traceEnvelope,
 };

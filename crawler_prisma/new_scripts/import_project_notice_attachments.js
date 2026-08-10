@@ -2,22 +2,17 @@
 
 "use strict";
 
-const { DEFAULT_API_ROOT, openStores } = require("./lib/runtime");
-
-function parseArgs(argv) {
-  const options = { commit: false, apiRoot: process.env.PROJECT_RECOMMENDATION_API_ROOT || DEFAULT_API_ROOT };
-  for (const arg of argv) {
-    if (arg === "--commit") options.commit = true;
-    else if (arg === "--help" || arg === "-h") options.help = true;
-    else if (arg.startsWith("--api-root=")) options.apiRoot = require("node:path").resolve(arg.slice(11));
-    else throw new Error(`Unknown argument: ${arg}`);
-  }
-  return options;
-}
+const { openStores, parseCommonArgs, resolveDataSources } = require("./lib/runtime");
 
 function printHelp() {
   console.log(`Usage:
-  node import_project_notice_attachments.js [--commit] [--api-root=<path>]
+  node import_project_notice_attachments.js [options]
+
+Options:
+  --commit                 Upsert project attachment metadata.
+  --site=<site>            all, sxjm, sxzwfw, bitbid, huaxin, or jiubang.
+  --output-root=<path>     Crawler new_output root (used to select available sites).
+  --api-root=<path>        Project recommendation API directory.
 
 Copies attachment metadata and existing MinIO object references from
 raw_notice_attachment to project_notice_attachment. No file is uploaded again.
@@ -29,12 +24,14 @@ function identity(row) {
 }
 
 async function main() {
-  const options = parseArgs(process.argv.slice(2));
+  const options = parseCommonArgs(process.argv.slice(2));
   if (options.help) return printHelp();
   const stores = await openStores(options.apiRoot);
   try {
+    const dataSources = await resolveDataSources(stores.prisma, options.sites);
+    const dataSourceIds = [...dataSources.values()].map((source) => source.id);
     const rawAttachments = await stores.prisma.rawNoticeAttachment.findMany({
-      where: { rawNotice: { dataSourceId: { in: [6, 14] } } },
+      where: { rawNotice: { dataSourceId: { in: dataSourceIds } } },
       include: {
         rawNotice: {
           include: { extractionResults: { where: { projectNoticeId: { not: null } } } },

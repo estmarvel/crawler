@@ -81,6 +81,8 @@ def clean_html_keep_lines(value: Any) -> str:
 
 
 class SxjmParser:
+    parser_version = "sxjm-v12-unique-identifiers"
+
     """完全按山西焦煤详情接口和正文模板解析公告。"""
 
     PROJECT_TYPES = {"10": "货物", "20": "工程", "30": "服务"}
@@ -689,10 +691,22 @@ class SxjmParser:
     @staticmethod
     def _identifier_token(value: Any) -> str:
         match = re.search(
-            r"[A-Za-z0-9][A-Za-z0-9._/-]{2,190}",
+            r"[A-Za-z0-9][A-Za-z0-9._/()（）\[\]【】-]{2,190}",
             str(value or "").strip(),
         )
-        return match.group(0) if match else ""
+        if not match:
+            return ""
+        candidate = match.group(0).strip("._/-")
+        # SXJM 的 tender_number 偶尔只是机构/业务前缀（如 SJZBXS、fxkygyhw），
+        # 不具备公告级唯一性，不能用于数据库项目关联。完整编号至少包含数字。
+        if not re.search(r"\d", candidate):
+            return ""
+        if not all(
+            candidate.count(opening) == candidate.count(closing)
+            for opening, closing in (("(", ")"), ("（", "）"), ("[", "]"), ("【", "】"))
+        ):
+            return ""
+        return candidate
 
     @classmethod
     def _project_name(cls, detail: Mapping[str, Any], title: str) -> str:

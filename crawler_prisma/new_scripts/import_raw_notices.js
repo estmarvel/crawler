@@ -5,14 +5,15 @@
 const { randomUUID } = require("node:crypto");
 const {
   assertMaxLength,
-  deduplicate,
+  iterateJsonNotices,
+  jsonNoticeFiles,
   nullableString,
   openStores,
   parseCommonArgs,
   parseCrawlerDate,
-  readJsonNotices,
   requiredString,
   resolveDataSources,
+  stableDigest,
   traceEnvelope,
 } = require("./lib/runtime");
 
@@ -22,10 +23,10 @@ function printHelp() {
 
 Options:
   --commit                 Write MongoDB documents and MySQL index rows.
-  --site=<site>            all, huaxin, jiubang, sxjm, or sxzwfw (default: all).
+  --site=<site>            all, sxjm, sxzwfw, bitbid, huaxin, or jiubang.
   --crawl-task-id=<id>     Optional existing crawl_task id; requires one site.
   --output-root=<path>     Crawler output root.
-  --api-root=<path>        ProjectRecommendationSystem/api directory.
+  --api-root=<path>        Project recommendation API directory.
   --help                   Show this help.
 
 Without --commit this command only validates JSON and does not connect to storage.
@@ -68,6 +69,17 @@ function mapRecord(record) {
 function contentChanged(existing, row) {
   if (existing.fingerprint && row.fingerprint) return existing.fingerprint !== row.fingerprint;
   return existing.sourceUrl !== row.sourceUrl || existing.title !== row.title;
+}
+
+function recordDigest(row) {
+  return stableDigest({
+    sourceUrl: row.sourceUrl,
+    title: row.title,
+    parseStatus: row.parseStatus,
+    fingerprint: row.fingerprint,
+    rawText: row.rawText,
+    publishDate: row.publishDate,
+  });
 }
 
 function validObjectId(ObjectId, value) {
@@ -222,46 +234,63 @@ async function importOne(stores, row, dataSourceId, crawlTaskId) {
 async function main() {
   const options = parseCommonArgs(process.argv.slice(2), { crawlTaskId: null });
   if (options.help) return printHelp();
-
-  const loaded = readJsonNotices(options.outputRoot, options.sites);
-  const mapped = loaded.records.map(mapRecord);
-  const deduplicated = deduplicate(mapped, (row) => `${row.site}\u0000${row.sourceNoticeId}`);
   console.log(`Mode: ${options.commit ? "COMMIT" : "DRY RUN (no storage writes)"}`);
   console.log(`Output root: ${options.outputRoot}`);
-  console.log(`Validated JSON files: ${loaded.jsonFileCount}`);
-  console.log(`Validated notices: ${deduplicated.records.length}`);
-  console.log(`Duplicate JSON notices skipped: ${deduplicated.duplicateCount}`);
-  for (const site of options.sites) {
-    console.log(`  ${site}: ${deduplicated.records.filter((row) => row.site === site).length}`);
-  }
-  if (!options.commit) return console.log("Dry run complete. Add --commit to write MongoDB and MySQL.");
+  console.log(`Validated JSON files: ${jsonNoticeFiles(options.outputRoot, options.sites).length}`);
 
-  const stores = await openStores(options.apiRoot, { mongo: true });
+  const stores = options.commit ? await openStores(options.apiRoot, { mongo: true }) : null;
   try {
-    const dataSources = await resolveDataSources(stores.prisma, options.sites);
+    const dataSources = stores ? await resolveDataSources(stores.prisma, options.sites) : null;
     let crawlTaskId = null;
     if (options.crawlTaskId !== null) {
       crawlTaskId = BigInt(options.crawlTaskId);
-      const task = await stores.prisma.crawlTask.findUnique({ where: { id: crawlTaskId } });
-      const expectedDataSourceId = dataSources.get(options.sites[0]).id;
-      if (!task) throw new Error(`crawl_task.id=${crawlTaskId} does not exist`);
-      if (task.dataSourceId !== expectedDataSourceId) {
-        throw new Error(`crawl_task.id=${crawlTaskId} belongs to data_source_id=${task.dataSourceId}, expected ${expectedDataSourceId}`);
+      if (stores) {
+        const task = await stores.prisma.crawlTask.findUnique({ where: { id: crawlTaskId } });
+        const expectedDataSourceId = dataSources.get(options.sites[0]).id;
+        if (!task) throw new Error(`crawl_task.id=${crawlTaskId} does not exist`);
+        if (task.dataSourceId !== expectedDataSourceId) {
+          throw new Error(`crawl_task.id=${crawlTaskId} belongs to data_source_id=${task.dataSourceId}, expected ${expectedDataSourceId}`);
+        }
       }
     }
 
     const counts = { inserted: 0, updated: 0, versioned: 0 };
-    for (let index = 0; index < deduplicated.records.length; index += 1) {
-      const row = deduplicated.records[index];
-      const result = await importOne(stores, row, dataSources.get(row.site).id, crawlTaskId);
-      counts[result] += 1;
-      if ((index + 1) % 100 === 0 || index + 1 === deduplicated.records.length) {
-        console.log(`  Processed ${index + 1}/${deduplicated.records.length}`);
+    const siteCounts = new Map(options.sites.map((site) => [site, 0]));
+    const identities = new Map();
+    let duplicateCount = 0;
+    let processed = 0;
+    for await (const record of iterateJsonNotices(options.outputRoot, options.sites)) {
+      const row = mapRecord(record);
+      const key = `${row.site}\u0000${row.sourceNoticeId}`;
+      if (identities.has(key)) {
+        duplicateCount += 1;
+        if (recordDigest(identities.get(key)) !== recordDigest(row)) {
+          throw new Error(
+            `${row.context}: conflicting duplicate 公告ID=${row.sourceNoticeId}; `
+            + `first seen at ${identities.get(key).context}`,
+          );
+        }
+        continue;
+      } else {
+        identities.set(key, row);
+        siteCounts.set(row.site, siteCounts.get(row.site) + 1);
+      }
+      if (stores) {
+        const result = await importOne(stores, row, dataSources.get(row.site).id, crawlTaskId);
+        counts[result] += 1;
+      }
+      processed += 1;
+      if (processed % 100 === 0) {
+        console.log(`  Processed ${processed}`);
       }
     }
+    console.log(`Validated notices: ${identities.size}`);
+    console.log(`Duplicate JSON notices encountered: ${duplicateCount}`);
+    for (const site of options.sites) console.log(`  ${site}: ${siteCounts.get(site)}`);
+    if (!stores) return console.log("Dry run complete. Add --commit to write MongoDB and MySQL.");
     console.log(`Commit completed: inserted=${counts.inserted}, updated=${counts.updated}, new_versions=${counts.versioned}.`);
   } finally {
-    await stores.close();
+    if (stores) await stores.close();
   }
 }
 
@@ -272,4 +301,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { exportMetadata, mapRecord };
+module.exports = { exportMetadata, mapRecord, recordDigest };
