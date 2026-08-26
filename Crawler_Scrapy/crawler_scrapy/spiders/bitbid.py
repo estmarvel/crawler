@@ -9,6 +9,10 @@ from typing import Any, Mapping
 from scrapy import Request
 from scrapy.http import Response
 
+from crawler_scrapy.ai.glm52_profile import (
+    GLM52_HYBRID_SETTINGS,
+    install_hybrid_pipeline,
+)
 from crawler_scrapy.schemas.notice_fields import coerce_datetime
 from crawler_scrapy.sites.bitbid import config
 from crawler_scrapy.sites.bitbid.parser import BitbidParser
@@ -22,8 +26,66 @@ class BitbidSpider(BaseNoticeSpider):
     allowed_domains = ["www.bitbid.cn", "zb.bitbid.cn"]
     parser_version = BitbidParser.parser_version
     extraction_model_name = "bitbid-site-rule-parser"
+    ai_metadata_key = "bitbidHybridAi"
+    ai_trusted_fields_meta_key = "bitbidApiTrustedFields"
+    ai_log_name = "比比网"
+
+    # 比比网的标题、发布日期和部分项目元数据来自 API；模型只处理正文/PDF
+    # 规则出现明确异常的字段。长章节越界、HTML 残留、缺失标签值和结果列表
+    # 错位均由通用 Pipeline 自动触发，不对正常字段增加调用成本。
+    ai_extract_fields = {
+        "招标计划": (),
+        "资格预审公告": (),
+        "招标公告": (),
+        "中标候选人公示": (),
+        "定标候选人公示": (),
+        "中标结果公示": (),
+        "更正结果公示": (),
+    }
+    ai_sparse_review_fields = {}
+    ai_candidate_fields = {
+        "招标计划": (
+            "项目名称", "项目编号", "招标编号", "项目总投资", "招标内容",
+            "建设地点", "建设内容及规模", "招标人名称",
+        ),
+        "招标公告": (
+            "项目名称", "项目编号", "招标编号", "项目总投资/估算金额",
+            "招标金额", "资金来源", "项目地点", "项目规模", "质量要求",
+            "招标内容与范围", "申请人资格要求/投标人资格要求", "获取方式",
+            "递交方法", "开启地点", "投标保证金方式",
+        ),
+        "资格预审公告": (
+            "项目名称", "项目编号", "招标编号", "项目总投资/估算金额",
+            "招标金额", "资金来源", "项目地点", "项目概况与招标范围",
+            "申请人资格要求/投标人资格要求", "获取方式", "递交方法",
+            "开启地点", "投标保证金方式",
+        ),
+        "中标候选人公示": (
+            "项目名称", "项目编号", "招标编号", "公示时间",
+            "中标候选人名称", "中标候选人报价",
+        ),
+        "定标候选人公示": (
+            "项目名称", "项目编号", "招标编号", "公示时间",
+            "定标候选人名称", "定标候选人报价", "定标候选人项目经理",
+            "定标候选人项目经理相关证书及编号", "定标候选人项目副经理",
+            "定标候选人项目副经理相关证书及编号", "定标候选人资信情况",
+            "定标候选人业绩情况（名称、日期、金额）",
+        ),
+        "中标结果公示": (
+            "项目名称", "项目编号", "招标编号", "中标人名称", "中标价",
+            "联合体成员", "工期", "项目经理", "项目经理证书名称",
+            "项目经理证书编号",
+        ),
+        "更正结果公示": (
+            "项目名称", "项目编号", "招标编号", "开标时间",
+            "标书发售时间", "公告内容", "招标人地址", "招标人联系人",
+            "招标人联系方式", "招标代理机构", "招标代理机构地址",
+            "招标代理机构联系人", "招标代理机构联系方式",
+        ),
+    }
 
     custom_settings = {
+        **GLM52_HYBRID_SETTINGS,
         "ROBOTSTXT_OBEY": False,
         "CONCURRENT_REQUESTS_PER_DOMAIN": 2,
         "DOWNLOAD_DELAY": 0.6,
@@ -37,6 +99,7 @@ class BitbidSpider(BaseNoticeSpider):
     @classmethod
     def update_settings(cls, settings) -> None:
         super().update_settings(settings)
+        install_hybrid_pipeline(settings)
         pipelines = settings.getdict("ITEM_PIPELINES")
         pipelines["crawler_scrapy.pipelines.NoticeMultiFormatPipeline"] = None
         pipelines["crawler_scrapy.sites.bitbid.exporter.BitbidMultiFormatPipeline"] = 300
@@ -161,7 +224,6 @@ class BitbidSpider(BaseNoticeSpider):
             headers=self._headers(),
             callback=self.parse_list,
             cb_kwargs={"category": category, "page": page},
-            dont_filter=True,
         )
 
     @staticmethod
@@ -309,6 +371,18 @@ class BitbidSpider(BaseNoticeSpider):
             or detail.get("fabuTime")
             or self._record_time(list_record)
         )
+        source_notice_type = (
+            "资格预审公告"
+            if notice_type == "资格预审公告"
+            else str(data.get("公共类型") or "更正结果公示")
+            if notice_type == "更正结果公示"
+            else notice_type
+            if category == "tender"
+            and notice_type in {
+                "中标候选人公示", "定标候选人公示", "中标结果公示"
+            }
+            else config.CATEGORIES[category]["label"]
+        )
         return self.build_notice_item(
             notice_type=notice_type,
             notice_subtype=category,
@@ -323,5 +397,20 @@ class BitbidSpider(BaseNoticeSpider):
             extraction_model=self.extraction_model_name,
             extraction_version=self.parser_version,
             source_list_fingerprint=str(context.get("list_fingerprint") or ""),
+            field_meta={
+                "site_parser": self.parser_version,
+                "category": category,
+                "source_notice_type": source_notice_type,
+                "source_category_label": config.CATEGORIES[category]["label"],
+                "schema_notice_type": notice_type,
+                "detail_source": "json_api_with_html_or_pdf_body",
+                "bitbidApiTrustedFields": [
+                    field
+                    for field, present in (
+                        ("发布日期", bool(publish_time)),
+                    )
+                    if present
+                ],
+            },
             attachments=attachments,
         )

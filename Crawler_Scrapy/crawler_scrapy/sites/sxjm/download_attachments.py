@@ -2,7 +2,7 @@
 
 The notice spider first exports attachment metadata to JSON.  This module then
 downloads those URLs to deterministic paths and writes the resulting metadata
-back to the matching JSON record (and its CSV row).  A ``.part`` file is kept
+back to the matching JSON record (and optionally its legacy CSV row). A ``.part`` file is kept
 for interrupted transfers so a later run can resume with an HTTP Range request.
 """
 
@@ -96,7 +96,18 @@ def _file_md5(path: Path, chunk_size: int = 1024 * 1024) -> str:
 
 def _content_type(response: requests.Response, path: Path) -> str | None:
     header = str(response.headers.get("Content-Type") or "").split(";", 1)[0].strip()
-    return header or mimetypes.guess_type(path.name)[0]
+    inferred = mimetypes.guess_type(path.name)[0]
+    # Download endpoints commonly return a generic binary MIME type even when
+    # the source file name has a reliable extension. Prefer the extension in
+    # that case so PDF/Office attachments remain usable by later parsers.
+    if not header or header.lower() in {
+        "application/octet-stream",
+        "application/x-download",
+        "application/x-msdownload",
+        "binary/octet-stream",
+    }:
+        return inferred or header or None
+    return header
 
 
 def _existing_metadata(path: Path) -> dict[str, Any]:
@@ -122,6 +133,7 @@ class DownloadConfig:
     chunk_size: int = 1024 * 1024
     max_attachments: int = 0
     outbound_mode: str = "direct"
+    sync_csv: bool = True
 
 
 class AttachmentDownloader:
@@ -218,6 +230,8 @@ class AttachmentDownloader:
         if not isinstance(attachment, dict):
             return
         attachment.update(metadata)
+        # 新结构只维护顶层附件；旧结构若仍带 exportMetadata，则同步更新，
+        # 保证历史 JSON 在附件补下载后继续自洽。
         trace = row.get("_trace")
         if not isinstance(trace, dict):
             return
@@ -407,7 +421,8 @@ class AttachmentDownloader:
 
     def _flush(self, path: Path, rows: list[dict[str, Any]]) -> None:
         self._write_json_atomic(path, rows)
-        self._sync_csv(path, rows)
+        if self.config.sync_csv:
+            self._sync_csv(path, rows)
 
     def _progress(self, row: Mapping[str, Any], attachment: Mapping[str, Any], status: str) -> None:
         print(
@@ -468,6 +483,10 @@ class AttachmentDownloader:
                             elif final_path.is_file() and final_path.stat().st_size > 0:
                                 metadata = _existing_metadata(final_path)
                                 metadata["storage_path"] = relative_path
+                                if attachment.get("parse_status") in {
+                                    "TEXT_EXTRACTED", "DOWNLOADED_NO_OCR"
+                                }:
+                                    metadata["parse_status"] = attachment["parse_status"]
                                 self.cached += 1
                                 status = "已存在，跳过下载"
                             else:
@@ -506,7 +525,8 @@ class AttachmentDownloader:
                 raise
             if dirty:
                 self._flush(path, rows)
-                print(f"[附件落盘] 已同步 JSON/CSV：{path.name}", flush=True)
+                target = "JSON/CSV" if self.config.sync_csv else "JSON"
+                print(f"[附件落盘] 已同步 {target}：{path.name}", flush=True)
             if self._stop_after_current:
                 break
 
@@ -527,7 +547,7 @@ def _positive_float(value: str) -> float:
 
 def build_argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="独立、可恢复地下载 SXJM JSON 中的附件")
-    parser.add_argument("--output-root", type=Path, default=Path("new_output"))
+    parser.add_argument("--output-root", type=Path, default=Path("output"))
     parser.add_argument("--connect-timeout", type=_positive_float, default=30.0)
     parser.add_argument("--read-timeout", type=_positive_float, default=900.0)
     parser.add_argument("--retries", type=int, default=4)
@@ -539,6 +559,13 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--outbound-mode", choices=("direct", "static"), default="direct"
     )
+    parser.add_argument(
+        "--no-sync-csv",
+        dest="sync_csv",
+        action="store_false",
+        help="仅将附件状态回写 JSON，不读取或更新历史 CSV",
+    )
+    parser.set_defaults(sync_csv=True)
     return parser
 
 
@@ -546,7 +573,7 @@ def run_downloader(
     downloader_class: type[AttachmentDownloader],
     argv: list[str] | None = None,
 ) -> int:
-    """共享五站附件命令行、锁、断点与退出码处理。"""
+    """共享当前框架站点的附件命令行、锁、断点与退出码处理。"""
 
     parser = build_argument_parser()
     parser.description = f"独立、可恢复地下载 {downloader_class.site_label} JSON 中的附件"
@@ -581,6 +608,7 @@ def run_downloader(
                     max_delay=args.max_delay,
                     max_attachments=args.max_attachments,
                     outbound_mode=args.outbound_mode,
+                    sync_csv=args.sync_csv,
                 )
             )
             return downloader.run()

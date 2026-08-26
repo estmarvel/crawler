@@ -2,7 +2,27 @@
 set -Eeuo pipefail
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 cd "${ROOT}"
-PY="${CRAWLER_PYTHON_COMMAND:-}"
-[[ -n "${PY}" ]] || [[ ! -x "${ROOT}/.venv/bin/python" ]] || PY="${ROOT}/.venv/bin/python"
-[[ -n "${PY}" ]] || [[ ! -x "/home/vipuser/miniconda3/envs/myenv/bin/python" ]] || PY="/home/vipuser/miniconda3/envs/myenv/bin/python"
-exec "${PY:-python3}" -m crawler_scrapy.site_runner sxjm "$@"
+ENV_FILE="${CRAWLER_AI_ENV_FILE:-${ROOT}/.env}"
+if [[ -f "${ENV_FILE}" ]]; then
+  set -a
+  source "${ENV_FILE}"
+  set +a
+fi
+PY=""
+for candidate in \
+  "${CRAWLER_PYTHON_COMMAND:-}" \
+  "${ROOT}/.venv/bin/python" \
+  "/home/vipuser/miniconda3/envs/myenv/bin/python"
+do
+  if [[ -n "${candidate}" ]] && [[ -x "${candidate}" ]] \
+    && "${candidate}" -c 'import scrapy' >/dev/null 2>&1
+  then
+    PY="${candidate}"
+    break
+  fi
+done
+if [[ -z "${PY}" ]]; then
+  echo "找不到安装了 Scrapy 的 Python；请设置 CRAWLER_PYTHON_COMMAND" >&2
+  exit 2
+fi
+exec "${PY}" -m crawler_scrapy.site_runner sxjm "$@"

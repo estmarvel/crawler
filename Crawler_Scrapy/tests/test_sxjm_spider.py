@@ -17,6 +17,10 @@ from crawler_scrapy.pipelines import (
     NoticeFilesPipeline,
     NoticeSchemaPipeline,
 )
+from crawler_scrapy.schemas.notice_fields import (
+    ANNOUNCEMENT_SCHEMAS,
+    PARSER_DIAGNOSTIC_FIELDS,
+)
 from crawler_scrapy.sites.sxjm import config
 from crawler_scrapy.sites.sxjm.audit import audit_record
 from crawler_scrapy.sites.sxjm.exporter import SxjmMultiFormatPipeline
@@ -82,12 +86,152 @@ def test_parser_maps_tender_notice_and_attachment():
     subtype, notice_type, data, attachments = SxjmParser.parse("zbxm", "zbgg", _detail())
     assert subtype == "zbgg"
     assert notice_type == "招标公告"
-    assert data["项目性质"] == "招标项目"
+    assert data["项目性质"] == ""
     assert data["源站公告性质"] == "招标（预审）公告"
     assert data["项目名称"]
     assert data["发布网站"] == config.PLATFORM_NAME
     assert attachments[0]["file_name"] == "招标公告.pdf"
     assert attachments[0]["file_url"].endswith("/zcpt/2026-07-21/example.pdf")
+
+
+def test_parser_maps_only_evidenced_project_nature_enums():
+    assert SxjmParser.parse("yfxm", "zbgg", _detail())[2]["项目性质"] == "依法必须招标"
+    assert SxjmParser.parse("fzxm", "cggg", _detail(5))[2]["项目性质"] == "非依法招标"
+    assert SxjmParser.parse("jycg", "cggg", _detail(5))[2]["项目性质"] == "非依法招标"
+    assert SxjmParser.parse("zbxm", "zbgg", _detail())[2]["项目性质"] == ""
+
+
+def test_parser_outputs_exact_latest_schema_fields_for_supported_types():
+    cases = (
+        ("yfxm", "zbjh", _detail(19), "招标计划"),
+        (
+            "zbxm",
+            "zbgg",
+            {**_detail(1), "title": "设备采购资格预审公告"},
+            "资格预审公告",
+        ),
+        ("zbxm", "zbgg", _detail(1), "招标公告"),
+        ("zbxm", "hxr", _detail(2), "中标候选人公示"),
+        ("zbxm", "zbjg", _detail(3), "中标结果公示"),
+        ("zbxm", "zzgg", _detail(4), "更正结果公示"),
+    )
+    for channel, section, detail, expected_type in cases:
+        _, notice_type, data, _ = SxjmParser.parse(channel, section, detail)
+        expected_fields = set(ANNOUNCEMENT_SCHEMAS[expected_type]) | set(
+            PARSER_DIAGNOSTIC_FIELDS.get(expected_type, ())
+        )
+        assert notice_type == expected_type
+        assert set(data) == expected_fields
+
+
+def test_parser_uses_prequalification_schema_and_separate_export_route():
+    detail = _detail(1)
+    detail["title"] = "材料框架协议采购项目资格预审公告"
+    detail["project_name"] = detail["title"]
+    detail["content"] = (
+        "<p>一、采购范围及相关要求</p>"
+        "<p>二、申请人资格要求：</p><p>申请人须具备独立法人资格。</p>"
+        "<p>三、资格预审文件的获取：</p><p>获取方式：登录平台下载。</p>"
+    )
+
+    subtype, notice_type, data, _ = SxjmParser.parse("zbxm", "zbgg", detail)
+
+    assert subtype == "zbgg"
+    assert notice_type == "资格预审公告"
+    assert data["项目名称"] == "材料框架协议采购项目"
+    assert data["项目概况与招标范围"] == ""
+    assert data["申请人资格要求/投标人资格要求"] == "申请人须具备独立法人资格。"
+    route = "__sxjm_prequalification_zbxm.zbgg__"
+    assert SxjmMultiFormatPipeline._route_config(route) == (
+        "招标项目_资格预审公告",
+        "资格预审公告",
+    )
+
+
+def test_parser_prioritizes_inline_tender_project_code_over_business_number():
+    detail = _detail(1)
+    detail["invest_project_code"] = ""
+    detail["tender_number"] = "SJZBZH04160625G003V32"
+    detail["content"] = (
+        "<p>项目编号：SJZBZH04160625G003V32</p>"
+        "<p>本项目（招标项目编号：D1401000936001700b13），已具备招标条件。</p>"
+    )
+
+    _, _, data, _ = SxjmParser.parse("yfxm", "zbgg", detail)
+
+    assert data["项目编号"] == "D1401000936001700b13"
+    assert data["招标编号"] == "SJZBZH04160625G003V32"
+    assert data["项目编号/招标编号"] == (
+        "D1401000936001700b13；SJZBZH04160625G003V32"
+    )
+
+
+def test_parser_does_not_treat_other_requirement_as_quality_and_prefers_deadline():
+    detail = _detail(5)
+    detail["bid_opening_date_format"] = "2026-08-12 09:00:00"
+    detail["content"] = (
+        "<p>2.5其他要求：卖方负责运输，费用和风险由卖方承担。</p>"
+        "<p>5.1递交截止时间：2026年8月12日8时30分</p>"
+        "<p>6.1开标时间：2026年8月12日9时00分</p>"
+    )
+
+    _, _, data, _ = SxjmParser.parse("jycg", "cggg", detail)
+
+    assert data["质量要求"] == ""
+    assert data["递交截止时间"] == "2026年8月12日8时30分"
+    assert data["开启时间"] == "2026-08-12 09:00:00"
+
+
+def test_parser_rejects_person_account_as_agency_but_keeps_explicit_organization():
+    detail = _detail(5)
+    detail["tendering_agency"] = "王国玺(FX)"
+    detail["content"] = "<p>采购人：山西汾西矿业（集团）有限责任公司</p>"
+
+    _, _, data, _ = SxjmParser.parse("jycg", "cggg", detail)
+
+    assert data["招标代理机构"] == ""
+    assert data["组织形式"] == ""
+
+    detail["content"] += "<p>采购代理机构：山西焦煤集团招标有限公司</p>"
+    _, _, data, _ = SxjmParser.parse("jycg", "cggg", detail)
+    assert data["招标代理机构"] == "山西焦煤集团招标有限公司"
+
+
+def test_parser_removes_notice_round_markers_without_damaging_real_project_name():
+    detail = _detail(5)
+    detail["project_name"] = "【二次】供热服务项目采购公告"
+    _, _, data, _ = SxjmParser.parse("jycg", "cggg", detail)
+    assert data["项目名称"] == "供热服务项目"
+
+    detail["project_name"] = "矿井工程(第2次招标)招标暂停公告"
+    _, _, data, _ = SxjmParser.parse("zbxm", "zzgg", detail)
+    assert data["项目名称"] == "矿井工程"
+
+    detail["project_name"] = "二次供水工程招标公告"
+    _, _, data, _ = SxjmParser.parse("zbxm", "zbgg", detail)
+    assert data["项目名称"] == "二次供水工程"
+
+    detail["project_name"] = "矿井设备采购项目（002标段）招标公告"
+    _, _, data, _ = SxjmParser.parse("zbxm", "zbgg", detail)
+    assert data["项目名称"] == "矿井设备采购项目（002标段）"
+
+    detail["project_name"] = "矿井设备采购项目招标三次延期公告"
+    _, _, data, _ = SxjmParser.parse("yfxm", "zbgg", detail)
+    assert data["项目名称"] == "矿井设备采购项目"
+
+
+def test_parser_reads_cross_line_delivery_address_as_delivery_method():
+    detail = _detail(5)
+    detail["content"] = (
+        "<p>5.响应文件递交</p>"
+        "<p>5.2递交地址：</p>"
+        "<p>登录山西焦煤电子招采平台上传响应文件。</p>"
+        "<p>6.开启时间：2026年8月12日9时00分</p>"
+    )
+
+    _, _, data, _ = SxjmParser.parse("jycg", "cggg", detail)
+
+    assert data["递交方法"] == "登录山西焦煤电子招采平台上传响应文件"
 
 
 def test_parser_keeps_complete_bracket_identifier_and_rejects_prefix_only_code():
@@ -104,6 +248,71 @@ def test_parser_keeps_complete_bracket_identifier_and_rejects_prefix_only_code()
     assert data["项目编号"] == ""
 
 
+def test_parser_rejects_all_zero_plan_code_and_cleans_duplicate_location_heading():
+    detail = _detail(19)
+    detail.update(
+        {
+            "title": "设备项目招标计划变更公告",
+            "project_name": "设备项目招标计划变更公告",
+            "invest_project_code": "0000-000000-00-00-000000",
+            "project_address": "四、山西省吕梁市中阳县武家庄镇吴家峁煤矿",
+            "content": "",
+        }
+    )
+    _, _, data, _ = SxjmParser.parse("yfxm", "zbjh", detail)
+
+    assert data["项目编号"] == ""
+    assert data["建设地点"] == "山西省吕梁市中阳县武家庄镇吴家峁煤矿"
+
+
+def test_parser_keeps_acquisition_operation_and_scope_without_neighbor_fields():
+    detail = _detail(5)
+    detail["content"] = """
+    <p>2.1采购范围：本项目采购支架搬运车。</p>
+    <p>2.2交货地点：采购人指定地点。</p>
+    <p>2.3交货期：合同签订后60天。</p>
+    <p>3.供应商资格要求：具有有效营业执照。</p>
+    <p>5.采购文件获取</p>
+    <p>5.1获取时间：2026年8月18日至2026年8月23日。</p>
+    <p>5.2获取方式：登录山西焦煤电子招采平台，通过“采购执行-我要参与”栏目获取。</p>
+    <p>5.3采购文件的获取：平台使用费缴后不退。</p>
+    <p>5.4联系人：供应商业务联系人。</p>
+    <p>5.5客服电话：4000016188-1。</p>
+    <p>6.响应文件递交</p>
+    """
+    _, _, data, _ = SxjmParser.parse("fzxm", "cggg", detail)
+
+    assert data["招标内容与范围"] == "本项目采购支架搬运车。"
+    assert data["获取方式"] == "登录山西焦煤电子招采平台，通过“采购执行-我要参与”栏目获取"
+    assert "平台使用费" not in data["获取方式"]
+    assert "客服电话" not in data["获取方式"]
+
+
+def test_parser_rejects_table_header_as_project_scale():
+    detail = _detail(5)
+    detail["content"] = "<p>项目概况：标段</p><p>采购范围：采购瓦斯测量装置。</p>"
+    _, _, data, _ = SxjmParser.parse("fzxm", "cggg", detail)
+    assert data["项目规模"] == ""
+
+
+def test_parser_keeps_real_project_overview_table_and_three_digit_lot_scope():
+    detail = _detail(5)
+    detail["content"] = """
+    <p>1.5采购项目概况：</p><p>标段</p><p>设备名称</p>
+    <p>004 第四标段</p><p>瓦斯抽放多参数测量装置</p><p>数量：30台</p>
+    <p>2.采购范围及相关要求</p>
+    <p>2.1采购范围：本采购项目划分为4个标段，本次采购为其中的：</p>
+    <p>004 第四标段：瓦斯抽放多参数测量装置</p>
+    <p>2.2交货地点：采购人指定地点。</p>
+    """
+
+    _, _, data, _ = SxjmParser.parse("fzxm", "cggg", detail)
+
+    assert "004 第四标段" in data["项目规模"]
+    assert "瓦斯抽放多参数测量装置" in data["项目规模"]
+    assert "004 第四标段：瓦斯抽放多参数测量装置" in data["招标内容与范围"]
+
+
 def test_source_types_remain_distinct_while_reusing_framework_schemas():
     cases = {
         "zbgg": ("招标公告", "招标公告"),
@@ -112,7 +321,7 @@ def test_source_types_remain_distinct_while_reusing_framework_schemas():
         "cjhxr": ("成交候选人公示", "中标候选人公示"),
         "zbjg": ("中标结果公示", "中标结果公示"),
         "cjgg": ("成交公告", "中标结果公示"),
-        "zzgg": ("终止公告", "招标公告"),
+        "zzgg": ("终止公告", "更正结果公示"),
     }
     for section, (source_type, schema_type) in cases.items():
         assert config.source_notice_type(section) == source_type
@@ -158,10 +367,44 @@ def test_audit_resolves_transaction_candidate_without_losing_schema_type():
 
 
 def test_parser_preserves_termination_nature():
-    subtype, notice_type, data, _ = SxjmParser.parse("zbxm", "zzgg", _detail(4))
+    detail = _detail(4)
+    detail["title"] = "运输系统项目四次招标终止公告"
+    detail["project_name"] = detail["title"]
+    detail["content"] = (
+        "<p>三、招标项目编号</p><p>SJZBNY02260225H058V13</p>"
+        "<p>五、招标终止原因</p><p>四次招标均不满足法定开标家数。</p>"
+        "<p>六、监督部门</p><p>监督部门为某行政审批局。</p>"
+    )
+    subtype, notice_type, data, _ = SxjmParser.parse("zbxm", "zzgg", detail)
     assert subtype == "zzgg"
-    assert notice_type == "招标公告"
-    assert data["源站公告性质"] == "终止公告"
+    assert notice_type == "更正结果公示"
+    assert data["公共类型"] == "终止公告"
+    assert data["项目名称"] == "运输系统项目"
+    assert data["项目编号"] == "SJZBNY02260225H058V13"
+    assert data["公告内容"] == "四次招标均不满足法定开标家数。"
+
+
+def test_parser_keeps_change_block_and_uses_final_opening_time():
+    detail = _detail(8)
+    detail["title"] = "矿井设备采购项目招标三次延期公告"
+    detail["project_name"] = detail["title"]
+    detail["content"] = (
+        "<p>一、内容</p>"
+        "<p>现将该招标项目开标时间调整如下：</p>"
+        "<p>原信息内容：</p><p>开标时间：2026-08-10 09:00</p>"
+        "<p>现延期为：</p><p>开标时间：2026-08-20 08:30</p>"
+        "<p>二、监督部门</p><p>监督部门为某行政审批局</p>"
+        "<p>三、联系方式</p><p>招标人：某煤业有限公司</p>"
+    )
+
+    _, notice_type, data, _ = SxjmParser.parse("yfxm", "zbgg", detail)
+
+    assert notice_type == "更正结果公示"
+    assert data["公共类型"] == "延期公告"
+    assert data["开标时间"] == "2026-08-20 08:30"
+    assert "原信息内容" in data["公告内容"]
+    assert "现延期为" in data["公告内容"]
+    assert "监督部门为" not in data["公告内容"]
 
 
 def test_spider_defaults_and_section_validation():
@@ -173,6 +416,7 @@ def test_spider_defaults_and_section_validation():
     request = spider._list_request("zbxm", "zbgg", "1", 1)
     assert "announcement_type=1" in request.url
     assert "category=3" in request.url
+    assert request.dont_filter is False
 
     non_tender = SxjmSpider(channels="fzxm")
     assert {feed[2] for feed in non_tender.feeds} == {"4", "5", "6", "7"}
@@ -202,7 +446,7 @@ def test_direct_mode_enables_guard_and_disables_system_proxy():
     assert settings.getint("DOWNLOAD_TIMEOUT") == 90
 
 
-def test_sxjm_snapshot_matches_json_trace_and_database_export_metadata(tmp_path):
+def test_sxjm_snapshot_and_payload_are_referenced_without_inline_duplicates(tmp_path):
     class Stats:
         def __init__(self):
             self.values = {}
@@ -265,10 +509,25 @@ def test_sxjm_snapshot_matches_json_trace_and_database_export_metadata(tmp_path)
     row = rows[0]
     assert row["HTML快照路径"] == item["snapshot_path"]
     assert row["HTML快照SHA256"] == digest
-    assert row["_trace"]["rawHtml"] == raw_html
-    assert row["_trace"]["integrity"]["rawHtmlSha256"] == digest
-    assert row["_trace"]["exportMetadata"]["snapshotPath"] == item["snapshot_path"]
-    assert row["_trace"]["exportMetadata"]["snapshotSha256"] == digest
+    trace = row["_trace"]
+    assert trace["schemaVersion"] == "2.0"
+    assert "rawHtml" not in trace
+    assert "rawText" not in trace
+    assert "exportMetadata" not in trace
+    payload_path = tmp_path / trace["payloadSnapshot"]["path"]
+    assert json.loads(payload_path.read_text(encoding="utf-8"))["detail"]["id"] == "snapshot-001"
+
+
+def test_content_addressed_snapshot_repairs_existing_hash_mismatch(tmp_path):
+    target = tmp_path / "notice_expectedhash.html"
+    target.write_bytes(b"externally modified")
+    expected = b"<p>source snapshot</p>"
+    digest = hashlib.sha256(expected).hexdigest()
+
+    HtmlSnapshotPipeline._write_content_addressed(target, expected, digest)
+
+    assert target.read_bytes() == expected
+    assert hashlib.sha256(target.read_bytes()).hexdigest() == digest
 
 
 def test_export_basenames_cover_all_homepage_channels():
@@ -283,7 +542,7 @@ def test_export_basenames_cover_all_homepage_channels():
 def test_parser_marks_other_channel_nature():
     _, notice_type, data, _ = SxjmParser.parse("fzxm", "cggg", _detail(5))
     assert notice_type == "招标公告"
-    assert data["项目性质"] == "非招项目"
+    assert data["项目性质"] == "非依法招标"
     assert data["源站公告性质"] == "采购（预审）公告"
 
 
@@ -335,6 +594,33 @@ def test_site_parser_extracts_candidate_and_award_tables():
     _, _, award_data, _ = SxjmParser.parse("fzxm", "cjgg", award)
     assert award_data["中标人名称"] == ["乙公司"]
     assert award_data["中标价"] == ["88万元"]
+
+
+def test_site_parser_extracts_vertical_award_table_with_candidate_header():
+    detail = _detail(7)
+    detail["content"] = (
+        "<p>一、中标人信息</p><p>标段名称：设备采购标段四</p>"
+        "<p>排序</p><p>中标候选人名称</p><p>1</p>"
+        "<p>中煤科工集团上海有限公司</p>"
+    )
+
+    _, _, data, _ = SxjmParser.parse("zbxm", "zbjg", detail)
+
+    assert data["中标人名称"] == ["中煤科工集团上海有限公司"]
+    assert data["中标价"] == [None]
+
+
+def test_site_parser_extracts_vertical_award_table_with_unit_header():
+    detail = _detail(7)
+    detail["content"] = (
+        "<p>一、中标结果</p><p>项目名称：科研服务项目</p>"
+        "<p>序号</p><p>中标单位名称</p><p>1</p><p>中国矿业大学</p>"
+    )
+
+    _, _, data, _ = SxjmParser.parse("zbxm", "zbjg", detail)
+
+    assert data["中标人名称"] == ["中国矿业大学"]
+    assert data["中标价"] == [None]
 
 
 def test_site_parser_maps_multiple_tables_to_multiple_sections():
@@ -411,6 +697,7 @@ def test_site_parser_supports_award_unit_and_numbered_sections():
     )
     _, _, data, _ = SxjmParser.parse("fzxm", "cjgg", detail)
     assert data["中标人名称"] == ["甲公司", "乙公司"]
+    assert data["中标价"] == [None, None]
     assert [x["标段"] for x in data["中标结果明细"]] == ["车辆一", "车辆二"]
 
 
@@ -523,7 +810,7 @@ def test_site_parser_extracts_shortlisted_supplier_tables_and_sections():
     _, _, data, _ = SxjmParser.parse("fzxm", "cjhxr", detail)
 
     assert data["中标候选人名称"] == ["甲公司", "乙公司"]
-    assert data["中标候选人报价"] == []
+    assert data["中标候选人报价"] == [None, None]
     assert data["中标候选人明细"] == [
         {
             "标段": "001 第一标段:二级截齿",
@@ -590,10 +877,13 @@ def test_source_nature_and_exporter_detect_misfiled_termination():
     detail = _detail(5)
     detail["title"] = "抑尘车项目采购撤销（终止）公告"
 
-    _, _, data, _ = SxjmParser.parse("fzxm", "cggg", detail)
+    _, notice_type, data, _ = SxjmParser.parse("fzxm", "cggg", detail)
 
-    assert data["源站公告性质"] == "撤销（终止）公告"
-    assert SxjmMultiFormatPipeline._is_termination("fzxm.cggg", data)
+    assert notice_type == "更正结果公示"
+    assert data["公共类型"] == "撤销公告"
+    assert SxjmMultiFormatPipeline._route_config(
+        "__sxjm_correction_fzxm.cggg__"
+    ) == ("非招项目_更正及其他公告", "更正结果公示")
 
 
 def test_spider_trace_keeps_list_and_detail_transport_context():
@@ -638,7 +928,7 @@ def test_spider_trace_keeps_list_and_detail_transport_context():
 
     assert "_crawler_list_trace" not in item["raw_data"]["list"]
     assert item["raw_data"]["detail"]["id"] == 44849
-    assert item["raw_data"]["transport"]["list"]["pagination"]["total"] == 1
+    assert "transport" not in item["raw_data"]
     assert item["response_metadata"]["relatedRequests"]["list"]["requestKind"] == "list_api"
     assert item["field_meta"]["site_parser"] == spider.parser_version
 

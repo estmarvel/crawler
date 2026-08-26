@@ -71,8 +71,9 @@ SECTION_TYPES = {
     "cjhxr": {"source_type": "成交候选人公示", "schema_type": "中标候选人公示"},
     "zbjg": {"source_type": "中标结果公示", "schema_type": "中标结果公示"},
     "cjgg": {"source_type": "成交公告", "schema_type": "中标结果公示"},
-    # 公共八类 Schema 没有终止公告字段形状；仅复用招标公告字段，不改变源站类型。
-    "zzgg": {"source_type": "终止公告", "schema_type": "招标公告"},
+    # 最新八类 Schema 将终止、撤销、流标等统一归入“更正结果公示”，
+    # 具体源站性质由“公共类型”和 fieldMeta 继续区分。
+    "zzgg": {"source_type": "终止公告", "schema_type": "更正结果公示"},
 }
 
 ANNOUNCEMENT_TYPE_LABELS = {

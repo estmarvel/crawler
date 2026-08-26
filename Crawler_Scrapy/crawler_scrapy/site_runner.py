@@ -13,7 +13,6 @@ import hashlib
 import json
 import os
 import random
-import signal
 import subprocess
 import sys
 import time
@@ -21,6 +20,13 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Sequence
+
+from crawler_scrapy.ai.provider_profiles import (
+    AUTO_PROVIDER,
+    GLM52_MODEL,
+    QWEN3_8B_MODEL,
+    resolve_provider,
+)
 
 
 @dataclass(frozen=True)
@@ -33,6 +39,7 @@ class SiteProfile:
     supports_project_types: bool = False
     parse_pdf_arg: bool = False
     default_channels: str = ""
+    json_only: bool = False
 
 
 PROFILES = {
@@ -43,12 +50,14 @@ PROFILES = {
         "crawler_scrapy.sites.sxjm.download_attachments",
         supports_channels=True,
         default_channels="yfxm,zbxm,fzxm,jycg",
+        json_only=True,
     ),
     "sxzwfw": SiteProfile(
         "sections",
         "zbjh,zbgg_zys,bg,hxr,gs,qt",
         "direct",
         "crawler_scrapy.sites.sxzwfw.download_attachments",
+        json_only=True,
     ),
     "bitbid": SiteProfile(
         "categories",
@@ -56,18 +65,21 @@ PROFILES = {
         "direct",
         "crawler_scrapy.sites.bitbid.download_attachments",
         parse_pdf_arg=True,
+        json_only=True,
     ),
     "huaxin": SiteProfile(
         "sections",
         "zbgg_zys,hxr,gs,zbjh",
         "direct",
         "crawler_scrapy.sites.huaxin.download_attachments",
+        json_only=True,
     ),
     "jiubang": SiteProfile(
         "sections",
         "zbgg_zys,hxr,gs,zbjh",
         "direct",
         "crawler_scrapy.sites.jiubang.download_attachments",
+        json_only=True,
     ),
     "qianji": SiteProfile(
         "categories",
@@ -76,6 +88,7 @@ PROFILES = {
         "crawler_scrapy.sites.qianji.download_attachments",
         supports_project_types=True,
         parse_pdf_arg=True,
+        json_only=True,
     ),
     "sxjkzcpt": SiteProfile(
         "categories",
@@ -91,12 +104,78 @@ PROFILES = {
         "direct",
         "crawler_scrapy.sites.trade365.download_attachments",
         supports_project_types=True,
+        json_only=True,
     ),
     "sxbid": SiteProfile(
         "categories",
         "plan,prequalification,tender,candidate,final_candidate,award,correction,contract",
         "direct",
         "crawler_scrapy.sites.sxbid.download_attachments",
+        json_only=True,
+    ),
+    "sxxindian": SiteProfile(
+        "feeds",
+        (
+            "bidding.plan.all,bidding.tender.engineering,bidding.tender.goods,"
+            "bidding.tender.service,bidding.other.engineering,bidding.other.goods,"
+            "bidding.other.service,bidding.prequalification.engineering,"
+            "bidding.prequalification.goods,bidding.prequalification.service,"
+            "bidding.change.engineering,bidding.change.goods,bidding.change.service,"
+            "bidding.candidate.engineering,bidding.candidate.goods,"
+            "bidding.candidate.service,bidding.award.engineering,bidding.award.goods,"
+            "bidding.award.service,purchase.notice.all,purchase.change.all,"
+            "purchase.award.all,purchase.contract.all,purchase.opinion.all,"
+            "purchase.tender.all"
+        ),
+        "direct",
+        "crawler_scrapy.sites.sxxindian.download_attachments",
+        json_only=True,
+    ),
+    "runshihua": SiteProfile(
+        "categories",
+        (
+            "prequalification,tender,purchase,prequalification_change,"
+            "tender_change,purchase_change,candidate,award,"
+            "candidate_correction,award_correction,control_price,"
+            "control_price_change,cancellation,supplement,delay"
+        ),
+        "direct",
+        "crawler_scrapy.sites.runshihua.download_attachments",
+        parse_pdf_arg=True,
+    ),
+    "gxebidding": SiteProfile(
+        "categories",
+        "tender,change,candidate,award,termination",
+        "direct",
+        "crawler_scrapy.sites.gxebidding.download_attachments",
+        supports_channels=True,
+        parse_pdf_arg=True,
+        default_channels="lawful,nonlawful,purchase",
+    ),
+    "lfggzyjy": SiteProfile(
+        "tables",
+        "gcjs_tender_plan,gcjs_notice,gcjs_zbhxrgs,gcjs_result_notice",
+        "direct",
+        "crawler_scrapy.sites.lfggzyjy.download_attachments",
+    ),
+    "sxzfcg": SiteProfile(
+        "categories",
+        "tender,award,change,contract",
+        "direct",
+        "crawler_scrapy.sites.sxzfcg.download_attachments",
+    ),
+    "sxty_ebidding": SiteProfile(
+        "feeds",
+        (
+            "engineering.plan,engineering.tender,engineering.change,"
+            "engineering.candidate,engineering.award,engineering.other,"
+            "engineering.termination,enterprise.plan,enterprise.tender,"
+            "enterprise.change,enterprise.candidate,enterprise.award,"
+            "enterprise.other"
+        ),
+        "direct",
+        "crawler_scrapy.sites.sxty_ebidding.download_attachments",
+        json_only=True,
     ),
 }
 
@@ -128,7 +207,7 @@ def build_parser(site: str) -> argparse.ArgumentParser:
         description=f"{site} 公告与附件统一可恢复运行入口"
     )
     parser.add_argument("--phase", choices=("all", "notices", "attachments"), default="all")
-    parser.add_argument("--output-root", type=Path, default=Path("new_output"))
+    parser.add_argument("--output-root", type=Path, default=Path("output"))
     parser.add_argument("--days", type=_positive_int, default=180)
     parser.add_argument("--all-history", "--all", action="store_true")
     parser.add_argument("--start-date")
@@ -146,6 +225,15 @@ def build_parser(site: str) -> argparse.ArgumentParser:
     )
     parser.add_argument("--page-size", type=_positive_int, default=100)
     parser.add_argument("--max-records", type=_positive_int, default=1_000_000)
+    parser.add_argument(
+        "--max-records-per-notice-type",
+        type=_nonnegative_int,
+        default=0,
+        help=(
+            "验收时按统一公告类型汇总限额；0 表示关闭。"
+            "山西新点同时会在 Spider 调度层提前截止"
+        ),
+    )
     parser.add_argument("--max-pages", type=_positive_int, default=10_000)
     parser.add_argument(
         "--sample-mode",
@@ -164,8 +252,18 @@ def build_parser(site: str) -> argparse.ArgumentParser:
     parser.add_argument("--delay-min", type=_nonnegative_float, default=3.0)
     parser.add_argument("--delay-max", type=_nonnegative_float, default=5.0)
     parser.add_argument("--responses-per-chunk", type=_positive_int, default=400)
-    parser.add_argument("--cooldown-min", type=_positive_int, default=180)
-    parser.add_argument("--cooldown-max", type=_positive_int, default=300)
+    parser.add_argument(
+        "--cooldown-min",
+        type=_nonnegative_int,
+        default=180,
+        help="达到单批响应预算后的最短冷却秒数；0 可关闭批次冷却",
+    )
+    parser.add_argument(
+        "--cooldown-max",
+        type=_nonnegative_int,
+        default=300,
+        help="达到单批响应预算后的最长冷却秒数；0 可关闭批次冷却",
+    )
     parser.add_argument("--request-timeout", type=_positive_int, default=300)
     parser.add_argument("--check-updates", action="store_true")
     parser.add_argument("--refresh-notices", action="store_true")
@@ -175,6 +273,43 @@ def build_parser(site: str) -> argparse.ArgumentParser:
     parser.add_argument("--attachment-min-delay", type=_nonnegative_float, default=2.0)
     parser.add_argument("--attachment-max-delay", type=_nonnegative_float, default=5.0)
     parser.add_argument("--max-attachments", type=_nonnegative_int, default=0)
+    parser.add_argument(
+        "--ai-extract",
+        action="store_true",
+        help="启用网站限定的 AI 辅助抽取与证据裁决",
+    )
+    parser.add_argument(
+        "--ai-provider",
+        choices=(AUTO_PROVIDER, "zhipu", "siliconflow"),
+        default=AUTO_PROVIDER,
+        help=(
+            "AI 提供方；auto 按模型名选择，GLM 默认智谱，"
+            "Qwen/Qwen3-8B 默认硅基流动"
+        ),
+    )
+    parser.add_argument(
+        "--ai-model",
+        default=(
+            GLM52_MODEL
+            if site in {"qianji", "sxjm", "bitbid", "trade365", "sxzwfw"}
+            else QWEN3_8B_MODEL
+        ),
+    )
+    parser.add_argument(
+        "--ai-max-calls",
+        type=_nonnegative_int,
+        default=None,
+        help="模型调用总上限；Qwen 默认 0（不限次数），GLM 默认 100",
+    )
+    parser.add_argument(
+        "--ai-min-interval",
+        type=_nonnegative_float,
+        default=None,
+        help=(
+            "同一 API Key 两次模型请求的最小启动间隔；默认使用模型配置。"
+            "全量双 Key 队列可按 TPM 预算显式设置"
+        ),
+    )
     return parser
 
 
@@ -203,7 +338,12 @@ class SiteRunner:
             ),
             "page_size": args.page_size,
             "max_records": args.max_records,
+            "max_records_per_notice_type": args.max_records_per_notice_type,
             "max_pages": args.max_pages,
+            "ai_extract": args.ai_extract,
+            "ai_provider": args.ai_provider if args.ai_extract else None,
+            "ai_model": args.ai_model if args.ai_extract else None,
+            "ai_max_calls": args.ai_max_calls if args.ai_extract else None,
             "sample_mode": args.sample_mode if site == "sxjkzcpt" else None,
             "sample_seed": args.sample_seed if site == "sxjkzcpt" else None,
         }
@@ -328,6 +468,12 @@ class SiteRunner:
         ]
         if self.profile.supports_channels:
             values += ["-a", f"channels={self.args.channels}"]
+        if self.site == "sxxindian":
+            values += [
+                "-a",
+                "max_records_per_notice_type="
+                f"{self.args.max_records_per_notice_type}",
+            ]
         if self.site == "sxjkzcpt":
             values += [
                 "-a", f"sample_mode={self.args.sample_mode}",
@@ -341,14 +487,32 @@ class SiteRunner:
         if self.args.all_history and self.site != "sxzwfw":
             if self.site == "sxjm":
                 values += ["-a", "days="]
+            elif self.site == "sxxindian":
+                # 新点列表接口强制要求日期。2000 年仅作为稳定的全历史下界，
+                # 不参与公告字段，也避免 Spider 回退成默认近一年。
+                values += [
+                    "-a", "start_date=2000-01-01",
+                    "-a", f"end_date={date.today().isoformat()}",
+                ]
             return values
         return values + ["-a", f"start_date={self.start_date}", "-a", f"end_date={self.end_date}"]
 
     def _settings(self, request_delay: float) -> list[str]:
         check_updates = "False" if self.args.check_updates else "True"
-        # sxbid 对短时间并行请求会偶发返回 nginx 错误，强制单域单并发；
-        # 用户仍可调节 3~5 秒间隔和分批冷却，但不能绕过这个站点保护。
-        concurrency = 1 if self.site == "sxbid" else self.args.concurrency
+        # sxbid 对短时间并行请求会偶发返回 nginx 错误；gxebidding 的公开
+        # CMS/PDF 接口响应较慢且有明确限流；sxty_ebidding 的浏览器详情路由
+        # 存在人机验证。三者都强制单域单并发，避免固定出口触发风控。
+        concurrency = (
+            1
+            if self.site in {"sxbid", "gxebidding", "sxty_ebidding"}
+            else self.args.concurrency
+        )
+        ai_profile, ai_model = resolve_provider(
+            self.args.ai_provider, self.args.ai_model
+        )
+        ai_max_calls = self.args.ai_max_calls
+        if ai_max_calls is None:
+            ai_max_calls = 0 if ai_profile.name == "siliconflow" else 100
         values = {
             "CRAWLER_OUTBOUND_MODE": self.args.outbound_mode,
             "NOTICE_OUTPUT_ROOT": str(self.output_root),
@@ -357,7 +521,14 @@ class SiteRunner:
             "NOTICE_DEDUP_SKIP_KNOWN_IDENTITIES": check_updates,
             "NOTICE_SNAPSHOT_ENABLED": "True",
             "NOTICE_SNAPSHOT_REQUIRED": "False",
-            "NOTICE_AI_ENABLED": "False",
+            "NOTICE_EXPORT_CSV_ENABLED": (
+                "False" if self.profile.json_only else "True"
+            ),
+            "NOTICE_AI_ENABLED": "True" if self.args.ai_extract else "False",
+            "NOTICE_AI_MAX_CALLS": str(ai_max_calls),
+            "NOTICE_VALIDATION_MAX_PER_TYPE": str(
+                self.args.max_records_per_notice_type
+            ),
             "NOTICE_ATTACHMENT_DOWNLOAD_ENABLED": "False",
             "NOTICE_RESOLVE_ATTACHMENT_URLS": "True",
             "FILES_STORE": str(self.output_root),
@@ -392,6 +563,13 @@ class SiteRunner:
             "LOGSTATS_INTERVAL": "15",
             "LOG_LEVEL": "INFO",
         }
+        # 命令行设置优先级高于 Spider 的 GLM 默认配置，因此选择 Qwen 时会
+        # 同时切换提供方、密钥环境变量和输出格式；真实密钥不会进入命令行。
+        values.update(ai_profile.scrapy_settings(ai_model))
+        if self.args.ai_min_interval is not None:
+            values["NOTICE_AI_MIN_INTERVAL"] = str(
+                self.args.ai_min_interval
+            )
         result: list[str] = []
         for key, value in values.items():
             result += ["-s", f"{key}={value}"]
@@ -416,11 +594,20 @@ class SiteRunner:
                     log_file.flush()
                 return process.wait()
             except KeyboardInterrupt:
-                process.send_signal(signal.SIGINT)
+                # 交互终端/tmux 的 Ctrl-C 会同时发送给前台进程组中的
+                # SiteRunner 和 Scrapy。这里若再补发一次 SIGINT，Scrapy 会把
+                # 它视为“第二次强制停止”，可能在持久化 JOBDIR 队列头时被打断，
+                # 留下 0 字节 LIFO 计数文件。先等待子进程完成第一次优雅退出；
+                # 只有它没有响应时才用 SIGTERM 收尾。
                 try:
                     process.wait(timeout=30)
                 except subprocess.TimeoutExpired:
                     process.terminate()
+                    try:
+                        process.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait()
                 raise
 
     def run_notices(self) -> int:
@@ -440,7 +627,11 @@ class SiteRunner:
                 chunk += 1
                 chunk_path.write_text(f"{chunk}\n", encoding="utf-8")
                 delay = random.uniform(self.args.delay_min, self.args.delay_max)
-                effective_concurrency = 1 if self.site == "sxbid" else self.args.concurrency
+                effective_concurrency = (
+                    1
+                    if self.site in {"sxbid", "gxebidding", "sxty_ebidding"}
+                    else self.args.concurrency
+                )
                 stamp = time.strftime("%Y%m%d_%H%M%S")
                 log_path = self.log_dir / f"{self.scope_key}_chunk_{chunk:05d}_{stamp}.log"
                 print(
@@ -463,16 +654,40 @@ class SiteRunner:
                 if any(marker in content for marker in ("direct_access_blocked", "static_proxy_auth_failed")):
                     print("出口被限制或代理认证失败，已停止自动请求。", file=sys.stderr)
                     return 3
+                if any(
+                    marker in content
+                    for marker in (
+                        "sxty_captcha_detected",
+                        "sxty_non_json_response",
+                        "sxty_invalid_json_response",
+                        "sxty_api_rejected",
+                    )
+                ):
+                    print(
+                        "易招标接口出现验证码或异常响应，已保护性停爬并保留断点。",
+                        file=sys.stderr,
+                    )
+                    return 3
                 if "'finish_reason': 'closespider_pagecount'" in content:
                     cooldown = random.randint(self.args.cooldown_min, self.args.cooldown_max)
-                    print(f"达到响应预算，冷却 {cooldown} 秒；Ctrl-C 可安全停止。", flush=True)
-                    try:
-                        time.sleep(cooldown)
-                    except KeyboardInterrupt:
-                        print("已在冷却期停止；下次从断点继续。", flush=True)
-                        return 130
+                    if cooldown > 0:
+                        print(f"达到响应预算，冷却 {cooldown} 秒；Ctrl-C 可安全停止。", flush=True)
+                        try:
+                            time.sleep(cooldown)
+                        except KeyboardInterrupt:
+                            print("已在冷却期停止；下次从断点继续。", flush=True)
+                            return 130
+                    else:
+                        print("达到响应预算，已保存断点；不冷却，立即继续下一批。", flush=True)
                     continue
-                if "'finish_reason': 'finished'" not in content:
+                normal_finish = any(
+                    marker in content
+                    for marker in (
+                        "'finish_reason': 'finished'",
+                        "'finish_reason': 'validation_type_quota_reached'",
+                    )
+                )
+                if not normal_finish:
                     print(f"没有识别到正常结束原因：{log_path}", file=sys.stderr)
                     return 1
                 complete_path.write_text(
@@ -498,6 +713,8 @@ class SiteRunner:
             "--max-delay", str(self.args.attachment_max_delay),
             "--max-attachments", str(self.args.max_attachments),
         ]
+        if self.profile.json_only:
+            command.append("--no-sync-csv")
         print(f"[{time.strftime('%F %T')}] {self.site} 附件阶段，日志={log_path}", flush=True)
         try:
             return self._run_logged(command, log_path)
@@ -526,6 +743,19 @@ class SiteRunner:
                     "static 出口需要 HUAXIN_PROXY_USERNAME/HUAXIN_PROXY_PASSWORD；"
                     "交互终端会自动提示输入"
                 )
+        if self.args.ai_extract and self.args.phase in {"all", "notices"}:
+            ai_profile, ai_model = resolve_provider(
+                self.args.ai_provider, self.args.ai_model
+            )
+            key_status = (
+                "已配置" if os.environ.get(ai_profile.api_key_env, "").strip()
+                else "未配置（模型不可用时保留规则结果）"
+            )
+            print(
+                f"AI辅助解析：provider={ai_profile.name} model={ai_model} "
+                f"key_env={ai_profile.api_key_env} key={key_status}",
+                flush=True,
+            )
         if self.args.phase in {"all", "notices"}:
             status = self.run_notices()
             if status:

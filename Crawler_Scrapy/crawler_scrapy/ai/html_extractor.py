@@ -127,8 +127,10 @@ class AiExtractionConfig:
     max_output_tokens: int = 4000
     max_calls: int = 100
     json_mode: bool = False
+    response_format: str = ""
     include_optional_fields: bool = False
     fail_on_error: bool = False
+    enable_thinking: bool | None = None
 
     @classmethod
     def from_settings(cls, settings: Any) -> "AiExtractionConfig":
@@ -138,6 +140,7 @@ class AiExtractionConfig:
         api_key = str(_setting(settings, "NOTICE_AI_API_KEY", "") or "").strip()
         if not api_key and api_key_env:
             api_key = os.getenv(api_key_env, "").strip()
+        thinking_value = _setting(settings, "NOTICE_AI_ENABLE_THINKING", "")
         return cls(
             enabled=_as_bool(_setting(settings, "NOTICE_AI_ENABLED", False)),
             api_key=api_key,
@@ -166,11 +169,17 @@ class AiExtractionConfig:
             ),
             max_calls=max(0, int(_setting(settings, "NOTICE_AI_MAX_CALLS", 100))),
             json_mode=_as_bool(_setting(settings, "NOTICE_AI_JSON_MODE", False)),
+            response_format=str(
+                _setting(settings, "NOTICE_AI_RESPONSE_FORMAT", "") or ""
+            ).strip().lower(),
             include_optional_fields=_as_bool(
                 _setting(settings, "NOTICE_AI_INCLUDE_OPTIONAL_FIELDS", False)
             ),
             fail_on_error=_as_bool(
                 _setting(settings, "NOTICE_AI_FAIL_ON_ERROR", False)
+            ),
+            enable_thinking=(
+                None if thinking_value in (None, "") else _as_bool(thinking_value)
             ),
         )
 
@@ -201,6 +210,7 @@ class AiHtmlExtractionService:
         self._rate_lock = threading.Lock()
         self._last_call_started = 0.0
         self._call_count = 0
+        self._fatal_error = ""
 
     @staticmethod
     def _create_client(config: AiExtractionConfig):
@@ -225,6 +235,8 @@ class AiHtmlExtractionService:
     def _before_api_call(self) -> None:
         # 多个 Item 可在线程池中并行等待，但调用起始时间仍按全局间隔控制。
         with self._rate_lock:
+            if self._fatal_error:
+                raise RuntimeError(f"AI 服务已停止调用：{self._fatal_error}")
             if self.config.max_calls and self._call_count >= self.config.max_calls:
                 raise AiCallLimitReached(
                     f"AI API 调用次数已达到上限 {self.config.max_calls}"
@@ -235,6 +247,129 @@ class AiHtmlExtractionService:
                 time.sleep(wait_seconds)
             self._last_call_started = time.monotonic()
             self._call_count += 1
+
+    def _model_request_options(self) -> dict[str, Any]:
+        """按模型提供方生成稳定、低随机性的抽取参数。"""
+
+        model = self.config.model.casefold()
+        base_url = self.config.base_url.casefold()
+        if "qwen3" in model or "siliconflow" in base_url:
+            extra_body: dict[str, Any] = {"top_k": 20, "min_p": 0}
+            if self.config.enable_thinking is not None:
+                extra_body["enable_thinking"] = self.config.enable_thinking
+            return {
+                "temperature": 0.0,
+                "top_p": 0.8,
+                "extra_body": extra_body,
+            }
+        if "bigmodel.cn" in base_url:
+            extra_body = {"do_sample": False}
+            if self.config.enable_thinking is not None:
+                extra_body["thinking"] = {
+                    "type": "enabled" if self.config.enable_thinking else "disabled"
+                }
+            return {"extra_body": extra_body}
+        options: dict[str, Any] = {"temperature": 0}
+        if self.config.enable_thinking is not None:
+            options["extra_body"] = {
+                "enable_thinking": self.config.enable_thinking
+            }
+        return options
+
+    def _response_format(
+        self,
+        fields: Sequence[str],
+        *,
+        wrapped_fields: bool = False,
+    ) -> dict[str, Any] | None:
+        mode = self.config.response_format
+        if mode == "json_schema":
+            if wrapped_fields:
+                candidate = {
+                    "type": "object",
+                    "properties": {
+                        "window_id": {"type": "string"},
+                        "line_start": {"type": "string"},
+                        "line_end": {"type": "string"},
+                        "value": {
+                            "anyOf": [
+                                {"type": "string"},
+                                {"type": "array", "items": {"type": "string"}},
+                                {"type": "null"},
+                            ]
+                        },
+                    },
+                    "required": ["window_id", "line_start", "line_end", "value"],
+                    "additionalProperties": False,
+                }
+                field_properties = {
+                    field_name: {"anyOf": [candidate, {"type": "null"}]}
+                    for field_name in fields
+                }
+                payload_schema = {
+                    "type": "object",
+                    "properties": {
+                        "fields": {
+                            "type": "object",
+                            "properties": field_properties,
+                            "required": list(fields),
+                            "additionalProperties": False,
+                        }
+                    },
+                    "required": ["fields"],
+                    "additionalProperties": False,
+                }
+            else:
+                payload_schema = {
+                    "type": "object",
+                    "properties": {
+                        field_name: {
+                            "anyOf": [
+                                {"type": "string"},
+                                {"type": "array", "items": {"type": "string"}},
+                                {"type": "null"},
+                            ]
+                        }
+                        for field_name in fields
+                    },
+                    "required": list(fields),
+                    "additionalProperties": False,
+                }
+            return {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "notice_field_extraction",
+                    "strict": True,
+                    "schema": payload_schema,
+                },
+            }
+        if mode == "json_object" or (self.config.json_mode and not mode):
+            return {"type": "json_object"}
+        return None
+
+    @staticmethod
+    def _is_timeout_error(exc: Exception) -> bool:
+        name = type(exc).__name__.casefold()
+        text = str(exc).casefold()
+        return "timeout" in name or "timed out" in text or "timeout" in text
+
+    def _should_retry(self, exc: Exception) -> bool:
+        # 硅基流动免费端点超时通常表示队列拥塞；立即重放只会重复占用配额。
+        if (
+            "siliconflow" in self.config.base_url.casefold()
+            and self._is_timeout_error(exc)
+        ):
+            return False
+        return not bool(self._fatal_error)
+
+    def _remember_fatal_error(self, exc: Exception) -> None:
+        status = getattr(exc, "status_code", None)
+        text = str(exc).casefold()
+        if status in {400, 401, 403} or any(
+            marker in text
+            for marker in ("invalid token", "invalid api key", "authentication")
+        ):
+            self._fatal_error = self._safe_error(exc)
 
     def _truncate_text(self, text: str) -> str:
         limit = self.config.max_input_chars
@@ -344,11 +479,12 @@ class AiHtmlExtractionService:
                 kwargs: dict[str, Any] = {
                     "model": self.config.model,
                     "messages": messages,
-                    "temperature": 0,
                     "max_tokens": self.config.max_output_tokens,
                 }
-                if self.config.json_mode:
-                    kwargs["response_format"] = {"type": "json_object"}
+                kwargs.update(self._model_request_options())
+                response_format = self._response_format(requested)
+                if response_format is not None:
+                    kwargs["response_format"] = response_format
                 response = self.client.chat.completions.create(**kwargs)
                 content = response.choices[0].message.content
                 payload = self._parse_json_object(content)
@@ -368,14 +504,17 @@ class AiHtmlExtractionService:
                 result.error = str(exc)
                 return result
             except Exception as exc:  # SDK/API/JSON 错误均进入有限重试
+                self._remember_fatal_error(exc)
                 last_error = self._safe_error(exc)
-                if attempt < self.config.retry_times:
+                if attempt < self.config.retry_times and self._should_retry(exc):
                     delay = min(
                         self.config.retry_base_delay_seconds * (2**attempt),
                         self.config.retry_max_delay_seconds,
                     )
                     if delay > 0:
                         time.sleep(delay)
+                else:
+                    break
 
         result.error = last_error or "AI 提取失败"
         return result

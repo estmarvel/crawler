@@ -15,10 +15,15 @@ from crawler_scrapy.pipelines import _to_json_compatible
 from crawler_scrapy.schemas.notice_fields import (
     canonicalize_attachment_list,
     canonicalize_notice_data,
+    normalize_notice_type,
     get_missing_fields,
     get_notice_fields,
 )
 from crawler_scrapy.sites.trade365.parser import Trade365Parser
+from crawler_scrapy.storage.source_snapshots import (
+    load_record_html,
+    load_record_payload,
+)
 
 
 def _atomic_json(path: Path, rows: list[dict[str, Any]]) -> None:
@@ -66,8 +71,8 @@ def reparse(output_root: Path) -> int:
             raise ValueError(f"JSON不是数组：{path}")
         for row in rows:
             trace = row.get("_trace") if isinstance(row, dict) else None
-            payload = trace.get("payload") if isinstance(trace, dict) else None
-            raw_html = trace.get("rawHtml") if isinstance(trace, dict) else None
+            payload = load_record_payload(row, output_root)
+            raw_html = load_record_html(row, output_root)
             feed = payload.get("sourceFeed") if isinstance(payload, dict) else None
             list_record = payload.get("list") if isinstance(payload, dict) else None
             if not raw_html or not feed:
@@ -76,6 +81,13 @@ def reparse(output_root: Path) -> int:
                 str(feed), raw_html,
                 list_record=list_record if isinstance(list_record, dict) else {},
             )
+            stored_type = normalize_notice_type(row.get("公告类型"))
+            if stored_type != parsed.notice_type:
+                raise ValueError(
+                    "解析升级改变了公告Schema，拒绝在原文件中原地改写："
+                    f"id={row.get('公告ID')} {stored_type}->{parsed.notice_type}；"
+                    "请使用新的输出目录重新生成或执行专门的分类迁移"
+                )
             data = canonicalize_notice_data(parsed.notice_type, parsed.data)
             before = {field: row.get(field) for field in get_notice_fields(parsed.notice_type)}
             for field, value in data.items():
@@ -86,11 +98,7 @@ def reparse(output_root: Path) -> int:
             row["抽取版本"] = Trade365Parser.parser_version
             trace["crawlerVersion"] = Trade365Parser.parser_version
             trace["extractionVersion"] = Trade365Parser.parser_version
-            trace["rawText"] = parsed.raw_text
-            export = trace.get("exportMetadata")
-            if isinstance(export, dict):
-                export["missingFields"] = list(row["缺失字段"])
-                export["attachments"] = list(row["附件"])
+            row["公告正文"] = parsed.raw_text
             field_meta = trace.get("fieldMeta")
             if isinstance(field_meta, dict):
                 field_meta["snapshotReparsedWith"] = Trade365Parser.parser_version

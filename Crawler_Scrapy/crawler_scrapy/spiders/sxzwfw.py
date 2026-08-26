@@ -12,24 +12,33 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from calendar import monthrange
 from datetime import date, datetime, timedelta
+from io import BytesIO
+from pathlib import Path
 from typing import Any, Iterable, Mapping
 from urllib.parse import urlencode
 
 from scrapy import Request
 from scrapy.http import Response
 
-from crawler_scrapy.schemas.notice_fields import coerce_datetime
+from crawler_scrapy.ai.glm52_profile import (
+    GLM52_HYBRID_SETTINGS,
+    install_hybrid_pipeline,
+)
+from crawler_scrapy.schemas.notice_fields import coerce_datetime, get_notice_type_code
 from crawler_scrapy.sites.sxzwfw import config
 from crawler_scrapy.sites.sxzwfw.government_parser import (
     SxzwfwGovernmentProcurementParser,
 )
 from crawler_scrapy.sites.sxzwfw.parser import (
+    ParsedNotice,
     SxzwfwParser,
     pages_for_total,
     visible_content_text,
 )
+from crawler_scrapy.sites.sxjm.download_attachments import attachment_storage_path
 from crawler_scrapy.spiders.base_notice import BaseNoticeSpider
 
 
@@ -42,10 +51,13 @@ class SxzwfwSpider(BaseNoticeSpider):
     allowed_domains = ["prec.sxzwfw.gov.cn"]
     parser_version = SxzwfwParser.parser_version
     extraction_model_name = "sxzwfw-rule-parser"
+    ai_metadata_key = "sxzwfwHybridAi"
+    ai_trusted_fields_meta_key = "sxzwfwTrustedFields"
+    ai_log_name = "山西省公共资源交易平台"
     section_fallback_types = {
         "zbjh": ("招标计划", "zbjh"),
         "zbgg_zys": ("招标公告", "zbgg"),
-        "bg": ("招标公告", "zbgg"),
+        "bg": ("更正结果公示", "gzjg"),
         "hxr": ("中标候选人公示", "hxr"),
         "gs": ("中标结果公示", "zbjg"),
         "qt": ("招标公告", "zbgg"),
@@ -54,6 +66,7 @@ class SxzwfwSpider(BaseNoticeSpider):
     }
 
     custom_settings = {
+        **GLM52_HYBRID_SETTINGS,
         "ROBOTSTXT_OBEY": False,
         "NOTICE_SNAPSHOT_ENABLED": True,
         "NOTICE_SNAPSHOT_REQUIRED": True,
@@ -68,63 +81,60 @@ class SxzwfwSpider(BaseNoticeSpider):
         },
     }
 
+    # 旧配置会把 Schema 中几乎全部字段交给“只补空值”模型。现在改为 C
+    # 方案：正常规则字段不调用 AI，只有更正正文/合同正文做常规边界复核；
+    # 其余字段在缺失且有明确标签、HTML 残留、章节污染或列表错位时升级。
     ai_extract_fields = {
+        "招标计划": (),
+        "资格预审公告": (),
+        "招标公告": (),
+        "中标候选人公示": (),
+        "定标候选人公示": (),
+        "中标结果公示": (),
+        "更正结果公示": (),
+        "合同与履约": (),
+    }
+    ai_sparse_review_fields = {}
+    ai_candidate_fields = {
         "招标计划": (
-            "项目类型", "项目总投资", "招标内容", "招标人名称",
-            "行政监督部门", "建设地点", "建设内容及规模",
-            "招标公告（资格预审公告）预计发布时间",
+            "项目名称", "项目编号", "招标编号", "项目总投资", "招标内容",
+            "建设地点", "建设内容及规模", "招标人名称", "行政监督部门",
         ),
         "资格预审公告": (
-            "项目编号/招标编号", "项目总投资/估算金额", "招标金额",
-            "资金来源", "项目地点", "招标人/采购人名称",
-            "项目概况与招标范围", "申请人资格要求/投标人资格要求",
-            "预审文件获取时间", "获取方式", "递交截止时间", "递交方法",
-            "开启时间", "开启方式", "开启地点", "评审办法", "投标保证金方式",
-            "招标人地址", "招标人联系人", "招标人联系方式",
-            "招标代理机构", "招标代理机构地址", "招标代理机构联系人",
-            "招标代理机构联系方式",
+            "项目名称", "项目编号", "招标编号", "项目总投资/估算金额",
+            "招标金额", "资金来源", "项目地点", "项目概况与招标范围",
+            "申请人资格要求/投标人资格要求", "获取方式", "递交方法",
+            "开启地点", "投标保证金方式",
         ),
         "招标公告": (
-            "项目编号/招标编号", "项目总投资/估算金额", "招标金额",
-            "资金来源", "项目地点", "招标人/采购人名称", "项目规模",
-            "工期/服务期/供货日期", "质量要求", "招标内容与范围",
-            "申请人资格要求/投标人资格要求", "预审文件获取时间", "获取方式",
-            "递交截止时间", "递交方法", "开启时间", "开启方式", "开启地点",
-            "评审办法", "投标保证金方式", "招标人地址", "招标人联系人",
-            "招标人联系方式", "招标代理机构", "招标代理机构地址",
-            "招标代理机构联系人", "招标代理机构联系方式",
+            "项目名称", "项目编号", "招标编号", "项目总投资/估算金额",
+            "招标金额", "资金来源", "项目地点", "项目规模", "质量要求",
+            "招标内容与范围", "申请人资格要求/投标人资格要求", "获取方式",
+            "递交方法", "开启地点", "投标保证金方式",
         ),
         "中标候选人公示": (
-            "开标时间", "公示时间", "招标编号/项目编号",
-            "中标候选人名称", "中标候选人报价", "中标候选人明细",
-            "招标人/采购人", "招标人地址", "招标人联系人", "招标人联系方式",
-            "招标代理机构", "招标代理机构地址", "招标代理机构联系人",
-            "招标代理机构联系方式",
+            "项目名称", "项目编号", "招标编号", "公示时间",
+            "中标候选人名称", "中标候选人报价",
         ),
         "定标候选人公示": (
-            "开标时间", "公示时间", "招标编号/项目编号",
-            "定标候选人名称", "定标候选人报价", "招标人/采购人",
-            "招标人地址", "招标人联系人", "招标人联系方式",
+            "项目名称", "项目编号", "招标编号", "公示时间",
+            "定标候选人名称", "定标候选人报价",
+        ),
+        "中标结果公示": (
+            "项目名称", "项目编号", "招标编号", "中标人名称", "中标价",
+            "联合体成员", "工期", "项目经理", "项目经理证书名称",
+            "项目经理证书编号",
+        ),
+        "更正结果公示": (
+            "项目名称", "项目编号", "招标编号", "开标时间", "标书发售时间",
+            "公告内容", "招标人地址", "招标人联系人", "招标人联系方式",
             "招标代理机构", "招标代理机构地址", "招标代理机构联系人",
             "招标代理机构联系方式",
         ),
-        "中标结果公示": (
-            "中标人名称", "中标价", "中标结果明细", "工期", "项目经理",
-            "项目经理证书名称", "项目经理证书编号", "招标人/采购人",
-            "招标人地址", "招标人联系人", "招标人联系方式",
-            "招标代理机构", "招标代理机构地址", "招标代理机构联系人",
-            "招标代理机构联系方式", "依据文件", "依据文号",
-        ),
-        "更正结果公示": (
-            "公告内容", "开标时间", "标书发售时间", "招标人地址",
-            "招标人联系人", "招标人联系方式", "招标代理机构",
-            "招标代理机构地址", "招标代理机构联系人", "招标代理机构联系方式",
-            "监督部门地址", "监督部门联系人", "监督部门联系方式",
-            "依据文件", "依据文号",
-        ),
         "合同与履约": (
-            "项目编号", "合同名称", "招标人名称", "中标人名称",
-            "合同金额", "合同期限", "合同签署时间", "合同主要内容",
+            "项目名称", "项目编号", "招标编号", "合同名称", "招标人名称",
+            "中标人名称", "合同金额", "合同期限", "合同签署时间",
+            "合同主要内容",
         ),
     }
 
@@ -133,6 +143,7 @@ class SxzwfwSpider(BaseNoticeSpider):
         """替换站点导出器，并选择受保护直连、固定代理或天启代理出口。"""
 
         super().update_settings(settings)
+        install_hybrid_pipeline(settings)
         pipelines = settings.getdict("ITEM_PIPELINES")
         pipelines["crawler_scrapy.pipelines.NoticeMultiFormatPipeline"] = None
         pipelines[
@@ -337,9 +348,16 @@ class SxzwfwSpider(BaseNoticeSpider):
             len(self.query_windows),
             ",".join(self.sections),
         )
+        # 每个栏目只预排当前时间窗；当前月不足 max_records 时再由
+        # parse_list 递进到下一个月。旧实现一次性排入“月份数×栏目数”请求，
+        # 即使测试只需 5 条也会继续访问所有历史月份。
+        if not self.query_windows:
+            return
+        window_start, window_end = self.query_windows[0]
         for section in self.sections:
-            for window_start, window_end in self.query_windows:
-                yield self._list_request(section, 1, window_start, window_end)
+            yield self._list_request(
+                section, 1, window_start, window_end, window_index=0
+            )
 
     def _list_request(
         self,
@@ -347,6 +365,7 @@ class SxzwfwSpider(BaseNoticeSpider):
         page: int,
         window_start: date,
         window_end: date,
+        window_index: int = 0,
     ) -> Request:
         form = config.build_list_form(
             section,
@@ -368,6 +387,7 @@ class SxzwfwSpider(BaseNoticeSpider):
                 "page": page,
                 "window_start": window_start,
                 "window_end": window_end,
+                "window_index": window_index,
             },
             dont_filter=True,
         )
@@ -379,6 +399,7 @@ class SxzwfwSpider(BaseNoticeSpider):
         page: int,
         window_start: date,
         window_end: date,
+        window_index: int = 0,
     ) -> list[Request]:
         requests: list[Request] = []
         records = SxzwfwParser.parse_list_records(response.body)
@@ -425,6 +446,20 @@ class SxzwfwSpider(BaseNoticeSpider):
                 window_end,
                 page,
             )
+            if (
+                self._scheduled_counts[section] < self.max_records
+                and window_index + 1 < len(self.query_windows)
+            ):
+                next_start, next_end = self.query_windows[window_index + 1]
+                requests.append(
+                    self._list_request(
+                        section,
+                        1,
+                        next_start,
+                        next_end,
+                        window_index=window_index + 1,
+                    )
+                )
             return requests
 
         all_before_window = True
@@ -487,7 +522,13 @@ class SxzwfwSpider(BaseNoticeSpider):
         )
         if has_next:
             requests.append(
-                self._list_request(section, page + 1, window_start, window_end)
+                self._list_request(
+                    section,
+                    page + 1,
+                    window_start,
+                    window_end,
+                    window_index=window_index,
+                )
             )
         else:
             if all_before_window:
@@ -508,6 +549,20 @@ class SxzwfwSpider(BaseNoticeSpider):
                 total or "unknown",
                 total_pages or "unknown",
             )
+            if (
+                self._scheduled_counts[section] < self.max_records
+                and window_index + 1 < len(self.query_windows)
+            ):
+                next_start, next_end = self.query_windows[window_index + 1]
+                requests.append(
+                    self._list_request(
+                        section,
+                        1,
+                        next_start,
+                        next_end,
+                        window_index=window_index + 1,
+                    )
+                )
         return requests
 
     def parse_detail(
@@ -571,18 +626,6 @@ class SxzwfwSpider(BaseNoticeSpider):
                 data={"发布网站": config.PLATFORM_NAME},
                 raw_data={
                     "list": source_list,
-                    "detail": {
-                        "parseError": {
-                            "type": type(exc).__name__,
-                            "message": str(exc),
-                        },
-                        "parserVersion": parser_class.parser_version,
-                    },
-                    "transport": {
-                        "list": dict(list_trace)
-                        if isinstance(list_trace, Mapping)
-                        else None,
-                    },
                 },
                 raw_html=response.body,
                 raw_text=visible_content_text(response.body),
@@ -613,6 +656,222 @@ class SxzwfwSpider(BaseNoticeSpider):
             )
             return
 
+        body_attachment = next(
+            (
+                value
+                for value in parsed.attachments
+                if value.get("is_notice_body") and value.get("file_url")
+            ),
+            None,
+        )
+        if body_attachment:
+            yield Request(
+                str(body_attachment["file_url"]),
+                headers={"Referer": response.url, "Accept": "application/pdf,*/*"},
+                callback=self.parse_embedded_body_pdf,
+                errback=self.parse_embedded_body_pdf_error,
+                cb_kwargs={
+                    "section": section,
+                    "notice_id": notice_id,
+                    "source_list": source_list,
+                    "list_fingerprint": list_fingerprint,
+                    "detail_url": response.url,
+                    "detail_body": bytes(response.body),
+                    "detail_metadata": response_metadata,
+                },
+                # 省级页面会嵌入市级公共资源交易中心的正文 PDF。
+                meta={"allow_offsite": True},
+                dont_filter=True,
+            )
+            return
+
+        yield from self._finish_parsed_detail(
+            section=section,
+            notice_id=notice_id,
+            source_list=source_list,
+            list_fingerprint=list_fingerprint,
+            detail_url=response.url,
+            detail_body=bytes(response.body),
+            detail_metadata=response_metadata,
+            parsed=parsed,
+        )
+
+    @staticmethod
+    def _pdf_text(content: bytes) -> str:
+        """从 iframe 公告 PDF 的文字层读取正文。
+
+        不做 OCR；没有文字层时保留附件并将公告标记为 PARTIAL，
+        避免将只有“公告发布时间”的记录误判为完整解析。
+        """
+
+        if not content:
+            return ""
+        try:
+            from pypdf import PdfReader
+
+            return "\n".join(
+                page.extract_text() or ""
+                for page in PdfReader(BytesIO(content)).pages
+            ).strip()
+        except Exception:  # noqa: BLE001 - 解析失败由 PARTIAL 状态显式保留
+            return ""
+
+    def parse_embedded_body_pdf(
+        self,
+        response: Response,
+        section: str,
+        notice_id: str,
+        source_list: Mapping[str, Any],
+        list_fingerprint: str,
+        detail_url: str,
+        detail_body: bytes,
+        detail_metadata: Mapping[str, Any],
+    ):
+        parser_class = (
+            SxzwfwGovernmentProcurementParser
+            if section in config.GOVERNMENT_SECTION_CHANNELS
+            else SxzwfwParser
+        )
+        pdf_text = self._pdf_text(bytes(response.body))
+        parsed = parser_class.parse(
+            section,
+            detail_body,
+            source_list,
+            detail_url,
+            supplemental_text=pdf_text,
+        )
+        self._cache_embedded_body_pdf(
+            parsed=parsed,
+            notice_id=notice_id,
+            content=bytes(response.body),
+            text_extracted=bool(pdf_text),
+        )
+        metadata = dict(detail_metadata)
+        related = dict(metadata.get("relatedRequests") or {})
+        body_metadata = self.build_response_metadata(
+            response,
+            request_kind="embedded_notice_body_pdf",
+            context={"section": section, "noticeId": notice_id},
+        )
+        body_metadata["contentSha256"] = hashlib.sha256(response.body).hexdigest()
+        body_metadata["contentBytes"] = len(response.body)
+        body_metadata["textExtracted"] = bool(pdf_text)
+        related["bodyDocument"] = body_metadata
+        metadata["relatedRequests"] = related
+        yield from self._finish_parsed_detail(
+            section=section,
+            notice_id=notice_id,
+            source_list=source_list,
+            list_fingerprint=list_fingerprint,
+            detail_url=detail_url,
+            detail_body=detail_body,
+            detail_metadata=metadata,
+            parsed=parsed,
+            force_partial=not bool(pdf_text),
+        )
+
+    def parse_embedded_body_pdf_error(self, failure):
+        values = failure.request.cb_kwargs
+        section = values["section"]
+        parser_class = (
+            SxzwfwGovernmentProcurementParser
+            if section in config.GOVERNMENT_SECTION_CHANNELS
+            else SxzwfwParser
+        )
+        parsed = parser_class.parse(
+            section,
+            values["detail_body"],
+            values["source_list"],
+            values["detail_url"],
+        )
+        for attachment in parsed.attachments:
+            if attachment.get("is_notice_body"):
+                attachment["parse_status"] = "DOWNLOAD_FAILED"
+        metadata = dict(values["detail_metadata"])
+        related = dict(metadata.get("relatedRequests") or {})
+        related["bodyDocument"] = {
+            "requestKind": "embedded_notice_body_pdf",
+            "error": str(failure.value),
+        }
+        metadata["relatedRequests"] = related
+        yield from self._finish_parsed_detail(
+            section=section,
+            notice_id=values["notice_id"],
+            source_list=values["source_list"],
+            list_fingerprint=values["list_fingerprint"],
+            detail_url=values["detail_url"],
+            detail_body=values["detail_body"],
+            detail_metadata=metadata,
+            parsed=parsed,
+            force_partial=True,
+        )
+
+    def _cache_embedded_body_pdf(
+        self,
+        *,
+        parsed: ParsedNotice,
+        notice_id: str,
+        content: bytes,
+        text_extracted: bool,
+    ) -> None:
+        attachment = next(
+            (value for value in parsed.attachments if value.get("is_notice_body")),
+            None,
+        )
+        if not attachment or not content:
+            return
+        record = {
+            "平台代码": self.platform_code,
+            "公告类型": get_notice_type_code(parsed.notice_type) or parsed.notice_type,
+            "公告ID": notice_id,
+        }
+        relative_path = attachment_storage_path(record, attachment)
+        output_root = Path(
+            self.crawler.settings.get("NOTICE_OUTPUT_ROOT", "new_output")
+        ).expanduser().resolve()
+        target = output_root / relative_path
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if not target.is_file() or target.stat().st_size != len(content):
+                temporary = target.with_name(f".{target.name}.part")
+                temporary.write_bytes(content)
+                temporary.replace(target)
+        except OSError as exc:
+            self.logger.warning("iframe正文PDF落盘失败 notice=%s: %s", notice_id, exc)
+            attachment["parse_status"] = "STORAGE_FAILED"
+            return
+        attachment.update(
+            {
+                "storage_path": relative_path,
+                "file_hash": hashlib.md5(
+                    content, usedforsecurity=False
+                ).hexdigest(),
+                "file_size_bytes": len(content),
+                "file_type": "application/pdf",
+                "parse_status": (
+                    "TEXT_EXTRACTED" if text_extracted else "DOWNLOADED_NO_OCR"
+                ),
+            }
+        )
+
+    def _finish_parsed_detail(
+        self,
+        *,
+        section: str,
+        notice_id: str,
+        source_list: Mapping[str, Any],
+        list_fingerprint: str,
+        detail_url: str,
+        detail_body: bytes,
+        detail_metadata: Mapping[str, Any],
+        parsed: ParsedNotice,
+        force_partial: bool = False,
+    ):
+        parser_class = (
+            SxzwfwGovernmentProcurementParser
+            if section in config.GOVERNMENT_SECTION_CHANNELS
+            else SxzwfwParser
+        )
         engineering = section in config.ENGINEERING_SECTION_CHANNELS
         source_section_label = config.SECTION_CHANNELS[section][1]
         notice_subtype = (
@@ -625,28 +884,19 @@ class SxzwfwSpider(BaseNoticeSpider):
             notice_id=notice_id,
             title=parsed.title,
             publish_time=parsed.publish_time,
-            detail_url=response.url,
+            detail_url=detail_url,
             data=parsed.data,
             notice_subtype=notice_subtype,
             raw_data={
                 "list": source_list,
-                "detail": {
-                    "title": parsed.title,
-                    "publishTime": parsed.publish_time,
-                    "sourceSection": section,
-                    "sourceSectionLabel": source_section_label,
-                    "sourceNature": parsed.source_nature,
-                    "schemaNoticeType": parsed.notice_type,
-                    "schemaNoticeSubtype": parsed.subtype,
-                    "parserVersion": parser_class.parser_version,
-                },
-                "transport": {
-                    "list": dict(list_trace) if isinstance(list_trace, Mapping) else None,
-                },
             },
-            raw_html=response.body,
+            raw_html=detail_body,
             raw_text=parsed.raw_text,
-            parse_status="PARSED" if parsed.raw_text else "PARTIAL",
+            parse_status=(
+                "PARTIAL"
+                if force_partial or not self._has_substantive_body(parsed.raw_text)
+                else "PARSED"
+            ),
             extraction_model=getattr(
                 parser_class,
                 "extraction_model_name",
@@ -668,8 +918,9 @@ class SxzwfwSpider(BaseNoticeSpider):
                 "source_location": source_list.get("location") or "",
                 "schema_notice_type": parsed.notice_type,
                 "schema_notice_subtype": parsed.subtype,
+                "sxzwfwTrustedFields": ["发布日期"] if parsed.publish_time else [],
             },
-            response_metadata=response_metadata,
+            response_metadata=detail_metadata,
             source_list_fingerprint=list_fingerprint,
             attachments=parsed.attachments,
         )
@@ -685,12 +936,21 @@ class SxzwfwSpider(BaseNoticeSpider):
         meta_url = f"{base}/attachment_url.jspx?{urlencode({'cid': cms['content_id'], 'n': cms['count']})}"
         yield Request(
             meta_url,
-            headers={"Referer": response.url, "Accept": "application/json,*/*"},
+            headers={"Referer": detail_url, "Accept": "application/json,*/*"},
             callback=self.parse_attachment_metadata,
             errback=self.on_attachment_metadata_error,
             cb_kwargs={"item": item, "cms": cms},
             dont_filter=True,
         )
+
+    @staticmethod
+    def _has_substantive_body(raw_text: str) -> bool:
+        value = re.sub(
+            r"(?m)^\s*公告发布时间\s*[：:].*$",
+            "",
+            str(raw_text or ""),
+        ).strip()
+        return len(value) >= 40
 
     def parse_attachment_metadata(self, response: Response, item, cms: Mapping[str, Any]):
         try:
@@ -742,11 +1002,6 @@ class SxzwfwSpider(BaseNoticeSpider):
         related["attachmentMetadata"] = metadata_trace
         response_metadata["relatedRequests"] = related
         item["response_metadata"] = response_metadata
-        raw_data = dict(item.get("raw_data") or {})
-        transport = dict(raw_data.get("transport") or {})
-        transport["attachmentMetadata"] = metadata_trace
-        raw_data["transport"] = transport
-        item["raw_data"] = raw_data
         return item
 
     def on_attachment_metadata_error(self, failure):
@@ -774,11 +1029,6 @@ class SxzwfwSpider(BaseNoticeSpider):
         related["attachmentMetadata"] = error_trace
         response_metadata["relatedRequests"] = related
         item["response_metadata"] = response_metadata
-        raw_data = dict(item.get("raw_data") or {})
-        transport = dict(raw_data.get("transport") or {})
-        transport["attachmentMetadata"] = error_trace
-        raw_data["transport"] = transport
-        item["raw_data"] = raw_data
         self.logger.warning(
             "CMS附件元数据请求失败，保留公告和附件占位信息：%s",
             failure.getErrorMessage(),

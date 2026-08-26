@@ -120,6 +120,105 @@ class AiHtmlExtractorTest(unittest.TestCase):
         self.assertNotIn("response_format", call)
         self.assertIn("目标字段", call["messages"][1]["content"])
 
+    def test_service_can_disable_qwen_thinking_for_json_extraction(self):
+        client = _FakeClient('{"招标编号":"QJ-2026-001"}')
+        service = AiHtmlExtractionService(
+            AiExtractionConfig(
+                enabled=True,
+                api_key="fake",
+                min_interval_seconds=0,
+                retry_times=0,
+                json_mode=True,
+                enable_thinking=False,
+            ),
+            client=client,
+        )
+        result = service.extract(
+            notice_type="招标公告",
+            title="测试公告",
+            fields=["招标编号"],
+            text="招标编号：QJ-2026-001",
+        )
+        self.assertTrue(result.success)
+        call = client.completions.calls[0]
+        self.assertEqual(call["response_format"], {"type": "json_object"})
+        self.assertEqual(call["extra_body"], {"enable_thinking": False})
+
+    def test_siliconflow_qwen_uses_non_thinking_sampling_and_json_schema(self):
+        client = _FakeClient('{"招标编号":"QJ-2026-001"}')
+        service = AiHtmlExtractionService(
+            AiExtractionConfig(
+                enabled=True,
+                api_key="fake",
+                base_url="https://api.siliconflow.cn/v1",
+                model="Qwen/Qwen3-8B",
+                min_interval_seconds=0,
+                retry_times=0,
+                json_mode=True,
+                response_format="json_schema",
+                enable_thinking=False,
+            ),
+            client=client,
+        )
+
+        result = service.extract(
+            notice_type="招标公告",
+            title="测试公告",
+            fields=["招标编号"],
+            text="招标编号：QJ-2026-001",
+        )
+
+        self.assertTrue(result.success)
+        call = client.completions.calls[0]
+        self.assertEqual(call["temperature"], 0.0)
+        self.assertEqual(call["top_p"], 0.8)
+        self.assertEqual(
+            call["extra_body"],
+            {"top_k": 20, "min_p": 0, "enable_thinking": False},
+        )
+        response_format = call["response_format"]
+        self.assertEqual(response_format["type"], "json_schema")
+        schema = response_format["json_schema"]["schema"]
+        self.assertEqual(schema["required"], ["招标编号"])
+        self.assertFalse(schema["additionalProperties"])
+
+    def test_siliconflow_qwen_does_not_repeat_a_timed_out_free_request(self):
+        class APITimeoutError(Exception):
+            pass
+
+        class TimeoutCompletions:
+            calls = 0
+
+            def create(self, **_kwargs):
+                self.calls += 1
+                raise APITimeoutError("queued request timed out")
+
+        completions = TimeoutCompletions()
+        service = AiHtmlExtractionService(
+            AiExtractionConfig(
+                enabled=True,
+                api_key="fake",
+                base_url="https://api.siliconflow.cn/v1",
+                model="Qwen/Qwen3-8B",
+                min_interval_seconds=0,
+                retry_times=1,
+            ),
+            client=SimpleNamespace(
+                chat=SimpleNamespace(completions=completions)
+            ),
+        )
+
+        result = service.extract(
+            notice_type="招标公告",
+            title="测试公告",
+            fields=["资金来源"],
+            text="资金来源：财政资金",
+        )
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.attempts, 1)
+        self.assertEqual(completions.calls, 1)
+
     def test_service_keeps_both_ends_of_long_notice(self):
         config = AiExtractionConfig(
             enabled=True,
@@ -228,7 +327,7 @@ class AiHtmlExtractorTest(unittest.TestCase):
         )
         self.assertEqual(targets, ["招标金额", "招标人/采购人名称"])
 
-    def test_huaxin_ai_only_receives_html_business_fields(self):
+    def test_huaxin_legacy_ai_pipeline_has_no_unconditional_fields(self):
         pipeline = AiHtmlExtractionPipeline(
             config=AiExtractionConfig(
                 enabled=True,
@@ -248,10 +347,9 @@ class AiHtmlExtractorTest(unittest.TestCase):
         targets = pipeline._target_fields(
             "招标公告", item["data"], ItemAdapter(item)
         )
-        self.assertIn("招标金额", targets)
-        self.assertIn("招标代理机构联系方式", targets)
-        self.assertNotIn("项目名称", targets)
-        self.assertNotIn("发布日期", targets)
+        # 华新已切换到证据裁决型混合 Pipeline；旧“缺什么就整篇补什么”
+        # Pipeline 不应再收到无条件字段，避免重复调用模型。
+        self.assertEqual(targets, [])
 
         plan_item = crawler.spider.build_notice_item(
             notice_type="招标计划",

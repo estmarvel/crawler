@@ -7,6 +7,7 @@ const path = require("node:path");
 const test = require("node:test");
 const {
   buildBusinessDataset,
+  isBusinessReady,
   mapBusinessRecord,
   normalizeIdentifier,
   syntheticNameCode,
@@ -59,6 +60,11 @@ test("database notice type follows normalized transport code while subtype remai
     resolveNoticeType({ 公告类型: "AWARD", 公告子类型: "fzxm.cjgg" }),
     "中标结果公示",
   );
+});
+
+test("only PARSED notices may enter project business tables", () => {
+  assert.equal(isBusinessReady(notice("ready")), true);
+  assert.equal(isBusinessReady(notice("partial", { 解析状态: "PARTIAL" })), false);
 });
 
 test("name fallback gets a deterministic namespaced project code", () => {

@@ -4,15 +4,18 @@ import csv
 import json
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 
 from scrapy.exceptions import DropItem
 from scrapy.settings import Settings
 
 from crawler_scrapy.pipelines import (
+    HtmlSnapshotPipeline,
     NoticeDedupPipeline,
     NoticeMultiFormatPipeline,
     NoticeSchemaPipeline,
+    _to_json_compatible,
 )
 from crawler_scrapy.storage.dedup import (
     JsonNoticeDedupStore,
@@ -54,6 +57,14 @@ class _ExportSpider(BaseNoticeSpider):
 
 
 class DedupStoreTest(unittest.TestCase):
+    def test_datetime_transport_is_second_precision(self):
+        value = datetime(2026, 5, 25, 9, 30, 12, 987654)
+        self.assertEqual(_to_json_compatible(value), "2026-05-25 09:30:12")
+        self.assertEqual(
+            NoticeMultiFormatPipeline._serialize_csv(value),
+            "2026-05-25 09:30:12",
+        )
+
     def test_list_fingerprint_ignores_view_count_but_keeps_business_changes(self):
         original = {
             "annId": "1001",
@@ -114,11 +125,13 @@ class AppendExportTest(unittest.TestCase):
         spider = _ExportSpider()
         crawler = _Crawler(spider, output_root)
         dedup = NoticeDedupPipeline.from_crawler(crawler)
+        snapshot = HtmlSnapshotPipeline.from_crawler(crawler)
         schema = NoticeSchemaPipeline.from_crawler(crawler)
         exporter = NoticeMultiFormatPipeline.from_crawler(crawler)
         dedup.open_spider()
+        snapshot.open_spider()
         exporter.open_spider()
-        return spider, crawler, dedup, schema, exporter
+        return spider, crawler, dedup, snapshot, schema, exporter
 
     @staticmethod
     def _item(spider, text: str):
@@ -146,8 +159,9 @@ class AppendExportTest(unittest.TestCase):
         )
 
     @staticmethod
-    def _process(dedup, schema, exporter, item):
+    def _process(dedup, snapshot, schema, exporter, item):
         item = dedup.process_item(item)
+        item = snapshot.process_item(item)
         item = schema.process_item(item)
         return exporter.process_item(item)
 
@@ -155,9 +169,10 @@ class AppendExportTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             output_root = Path(directory)
 
-            spider, _, dedup, schema, exporter = self._pipelines(output_root)
+            spider, _, dedup, snapshot, schema, exporter = self._pipelines(output_root)
             self._process(
                 dedup,
+                snapshot,
                 schema,
                 exporter,
                 self._item(spider, "正文版本一"),
@@ -165,7 +180,7 @@ class AppendExportTest(unittest.TestCase):
             exporter.close_spider()
 
             # 模拟下一次 Scrapy 进程：索引从磁盘重新加载。
-            spider2, crawler2, dedup2, schema2, exporter2 = self._pipelines(
+            spider2, crawler2, dedup2, snapshot2, schema2, exporter2 = self._pipelines(
                 output_root
             )
             with self.assertRaises(DropItem):
@@ -173,6 +188,7 @@ class AppendExportTest(unittest.TestCase):
 
             self._process(
                 dedup2,
+                snapshot2,
                 schema2,
                 exporter2,
                 self._item(spider2, "正文版本二"),
@@ -191,18 +207,27 @@ class AppendExportTest(unittest.TestCase):
                 ["正文版本一", "正文版本二"],
             )
             trace = rows[1]["_trace"]
-            self.assertEqual(trace["schemaVersion"], "1.0")
-            self.assertEqual(trace["payload"]["source"]["body"], "正文版本二")
+            self.assertEqual(trace["schemaVersion"], "2.0")
+            payload_path = output_root / trace["payloadSnapshot"]["path"]
+            payload = json.loads(payload_path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["source"]["body"], "正文版本二")
             self.assertEqual(
-                trace["payload"]["source"]["largeNumericId"],
+                payload["source"]["largeNumericId"],
                 "2082356733120929792",
             )
-            self.assertEqual(trace["rawHtml"], "<p>正文版本二</p>")
-            self.assertEqual(trace["rawText"], "正文版本二")
+            self.assertNotIn("payload", trace)
+            self.assertNotIn("rawHtml", trace)
+            self.assertNotIn("rawText", trace)
+            self.assertNotIn("exportMetadata", trace)
             self.assertEqual(trace["crawlerVersion"], "rule-v1")
+            self.assertEqual(trace["extractionVersion"], "rule-v1")
+            self.assertNotIn("_dedup", trace["fieldMeta"])
             self.assertEqual(trace["responseMetadata"]["response"]["status"], 200)
-            self.assertEqual(len(trace["integrity"]["payloadSha256"]), 64)
-            self.assertEqual(len(trace["integrity"]["rawHtmlSha256"]), 64)
+            self.assertEqual(len(trace["payloadSnapshot"]["sha256"]), 64)
+            self.assertEqual(len(trace["integrity"]["rawTextSha256"]), 64)
+            html_path = output_root / rows[1]["HTML快照路径"]
+            self.assertEqual(html_path.read_text(encoding="utf-8"), "<p>正文版本二</p>")
+            self.assertEqual(rows[1]["招标编号"], "")
             with csv_path.open("r", encoding="utf-8-sig", newline="") as handle:
                 csv_rows = list(csv.DictReader(handle))
             self.assertEqual(len(csv_rows), 2)
@@ -229,6 +254,24 @@ class AppendExportTest(unittest.TestCase):
 
             self.assertNotIn("HTML快照路径", result["missing_fields"])
             self.assertNotIn("HTML快照SHA256", result["missing_fields"])
+
+    def test_json_only_export_does_not_create_csv_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output_root = Path(directory)
+            spider = _ExportSpider()
+            crawler = _Crawler(spider, output_root)
+            crawler.settings.set("NOTICE_EXPORT_CSV_ENABLED", False)
+            schema = NoticeSchemaPipeline.from_crawler(crawler)
+            exporter = NoticeMultiFormatPipeline.from_crawler(crawler)
+            exporter.open_spider()
+
+            item = schema.process_item(self._item(spider, "仅JSON正文"))
+            exporter.process_item(item)
+            exporter.close_spider()
+
+            site_dir = output_root / "dedup_export"
+            self.assertTrue((site_dir / "json" / "03_招标公告.json").is_file())
+            self.assertFalse((site_dir / "csv").exists())
 
     def test_dedup_state_can_be_shared_outside_task_output(self):
         with tempfile.TemporaryDirectory() as directory:

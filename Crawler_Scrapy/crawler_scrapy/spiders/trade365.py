@@ -8,6 +8,10 @@ from typing import Any, Mapping
 from scrapy import Request
 from scrapy.http import Response
 
+from crawler_scrapy.ai.glm52_profile import (
+    GLM52_HYBRID_SETTINGS,
+    install_hybrid_pipeline,
+)
 from crawler_scrapy.schemas.notice_fields import coerce_datetime
 from crawler_scrapy.sites.trade365 import config
 from crawler_scrapy.sites.trade365.parser import (
@@ -26,8 +30,45 @@ class Trade365Spider(BaseNoticeSpider):
     allowed_domains = ["shanxi.365trade.com.cn"]
     parser_version = Trade365Parser.parser_version
     extraction_model_name = "trade365-public-html-rule-parser"
+    ai_metadata_key = "trade365HybridAi"
+    ai_trusted_fields_meta_key = "trade365TrustedFields"
+    ai_log_name = "中招联合（山西）"
+
+    # 规则证据充分的字段不常态调用模型；范围、资格、更正内容等字段仅在
+    # 缺失、有标签未命中、HTML 残留、章节越界或名单/金额错位时升级 AI。
+    ai_extract_fields = {
+        "招标公告": (),
+        "中标候选人公示": (),
+        "中标结果公示": (),
+        "更正结果公示": (),
+    }
+    ai_sparse_review_fields = {}
+    ai_candidate_fields = {
+        "招标公告": (
+            "项目名称", "项目编号", "招标编号", "项目总投资/估算金额",
+            "招标金额", "资金来源", "项目地点", "项目规模", "质量要求",
+            "获取方式", "递交方法", "开启地点", "投标保证金方式",
+            "招标内容与范围", "申请人资格要求/投标人资格要求",
+        ),
+        "中标候选人公示": (
+            "项目名称", "项目编号", "招标编号", "公示时间",
+            "中标候选人名称", "中标候选人报价",
+        ),
+        "中标结果公示": (
+            "项目名称", "项目编号", "招标编号", "中标人名称", "中标价",
+            "联合体成员", "工期", "项目经理", "项目经理证书名称",
+            "项目经理证书编号",
+        ),
+        "更正结果公示": (
+            "项目名称", "项目编号", "招标编号", "所属行业", "开标时间",
+            "标书发售时间", "公告内容", "招标人地址", "招标人联系人",
+            "招标人联系方式", "招标代理机构", "招标代理机构地址",
+            "招标代理机构联系人", "招标代理机构联系方式", "依据文件", "依据文号",
+        ),
+    }
 
     custom_settings = {
+        **GLM52_HYBRID_SETTINGS,
         "ROBOTSTXT_OBEY": False,
         "CONCURRENT_REQUESTS_PER_DOMAIN": 2,
         "DOWNLOAD_DELAY": 1.0,
@@ -41,6 +82,7 @@ class Trade365Spider(BaseNoticeSpider):
     @classmethod
     def update_settings(cls, settings) -> None:
         super().update_settings(settings)
+        install_hybrid_pipeline(settings)
         pipelines = settings.getdict("ITEM_PIPELINES")
         pipelines["crawler_scrapy.pipelines.NoticeMultiFormatPipeline"] = None
         pipelines[
@@ -152,8 +194,43 @@ class Trade365Spider(BaseNoticeSpider):
         }
 
     def start_requests(self):
+        # SiteRunner uses a persistent JOBDIR and restarts Scrapy after every
+        # response budget.  When that scheduler already contains the saved
+        # frontier, seeding all feeds again would create another set of list
+        # chains on every chunk.  List requests intentionally use
+        # ``dont_filter=True`` because candidate/award share the same source
+        # URL but carry different feed context, so the regular dupefilter
+        # cannot protect us from that queue growth.
+        if self._resume_queue_has_pending_requests():
+            self.crawler.stats.inc_value(
+                "trade365/resume_skipped_start_request_seeding"
+            )
+            self.logger.info(
+                "检测到 JOBDIR 中存在待处理请求，仅恢复分页队列，不重复加入栏目首页"
+            )
+            return
         for feed in self.feeds:
             yield self._list_request(feed, 1)
+
+    def _resume_queue_has_pending_requests(self) -> bool:
+        """Return whether Scrapy restored a non-empty persistent frontier."""
+
+        crawler = getattr(self, "crawler", None)
+        engine = getattr(crawler, "engine", None)
+        # Scrapy 2.16 stores the execution slot in the private ``_slot``
+        # attribute.  Keep the public-name fallback for compatible wrappers
+        # and tests without binding the spider to one engine release.
+        slot = getattr(engine, "_slot", None) or getattr(engine, "slot", None)
+        scheduler = getattr(slot, "scheduler", None)
+        has_pending = getattr(scheduler, "has_pending_requests", None)
+        if not callable(has_pending):
+            return False
+        try:
+            return bool(has_pending())
+        except (AttributeError, RuntimeError):
+            # A direct unit call or an engine that is still being initialized
+            # must behave like a fresh crawl and seed the selected feeds.
+            return False
 
     async def start(self):
         for request in self.start_requests():
@@ -183,6 +260,8 @@ class Trade365Spider(BaseNoticeSpider):
     def _matches_feed(source_category: str, title: str) -> bool:
         actual, _ = classify_category(source_category, title)
         if source_category == "change":
+            return True
+        if actual == "correction" and source_category in {"candidate", "award"}:
             return True
         return actual == source_category
 
@@ -286,8 +365,16 @@ class Trade365Spider(BaseNoticeSpider):
                 "source_feed": feed,
                 "source_category": feed.split(".", 1)[0],
                 "actual_category": parsed.category,
+                "source_notice_type": {
+                    "tender": "招标公告",
+                    "change": "变更公告",
+                    "candidate": "结果公示",
+                    "award": "结果公示",
+                }.get(feed.split(".", 1)[0], ""),
+                "schema_notice_type": parsed.notice_type,
                 "project_type": config.PROJECT_TYPES[project_type][0],
                 "validation_warnings": list(parsed.validation_warnings),
+                "trade365TrustedFields": ["发布日期"] if parsed.publish_time else [],
             },
             response_metadata=self.build_response_metadata(
                 response,

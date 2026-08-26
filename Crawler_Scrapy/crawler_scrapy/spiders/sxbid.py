@@ -2,13 +2,20 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import datetime, time, timedelta
+from pathlib import Path
 from typing import Any, Mapping
 
 from scrapy import FormRequest, Request
 from scrapy.http import Response
 
-from crawler_scrapy.schemas.notice_fields import coerce_datetime
+from crawler_scrapy.ai.glm52_profile import (
+    QWEN3_HYBRID_SETTINGS,
+    install_hybrid_pipeline,
+)
+from crawler_scrapy.schemas.notice_fields import ANNOUNCEMENT_SCHEMAS, coerce_datetime
 from crawler_scrapy.sites.sxbid import config
 from crawler_scrapy.sites.sxbid.parser import (
     ParsedPage,
@@ -18,7 +25,21 @@ from crawler_scrapy.sites.sxbid.parser import (
     parse_list_records,
     parse_page_info,
 )
+from crawler_scrapy.sites.sxjm.download_attachments import attachment_storage_path
 from crawler_scrapy.spiders.base_notice import BaseNoticeSpider
+
+
+SXBID_AI_FIXED_FIELDS = frozenset(
+    {
+        "发布日期",
+        "发布网站",
+        "项目性质",
+        "项目编号/招标编号",
+        "招标编号/项目编号",
+        "项目类型/行业分类",
+        "公告内容",
+    }
+)
 
 
 class SxbidSpider(BaseNoticeSpider):
@@ -28,8 +49,49 @@ class SxbidSpider(BaseNoticeSpider):
     allowed_domains = ["www.sxbid.com.cn", "sxbid.com.cn"]
     parser_version = SxbidParser.parser_version
     extraction_model_name = "sxbid-public-html-pdf-rule-parser"
+    ai_metadata_key = "sxbidHybridAi"
+    ai_trusted_fields_meta_key = "sxbidTrustedFields"
+    ai_log_name = "山西省招标投标公共服务平台"
+
+    ai_extract_fields = {
+        "招标计划": ("建设内容及规模",),
+        "资格预审公告": (
+            "资金来源",
+            "项目概况与招标范围",
+            "申请人资格要求/投标人资格要求",
+            "获取方式",
+            "递交方法",
+            "投标保证金方式",
+        ),
+        "招标公告": (
+            "资金来源",
+            "项目规模",
+            "招标内容与范围",
+            "申请人资格要求/投标人资格要求",
+            "工期/服务期/供货日期",
+            "质量要求",
+            "获取方式",
+            "递交方法",
+            "投标保证金方式",
+        ),
+        "中标候选人公示": (),
+        "定标候选人公示": (),
+        "中标结果公示": (),
+        "更正结果公示": (),
+        "合同与履约": (),
+    }
+    ai_sparse_review_fields = {}
+    ai_candidate_fields = {
+        notice_type: tuple(
+            field
+            for field in ANNOUNCEMENT_SCHEMAS[notice_type]
+            if field not in SXBID_AI_FIXED_FIELDS
+        )
+        for notice_type in ai_extract_fields
+    }
 
     custom_settings = {
+        **QWEN3_HYBRID_SETTINGS,
         "ROBOTSTXT_OBEY": False,
         "CONCURRENT_REQUESTS_PER_DOMAIN": 1,
         "DOWNLOAD_DELAY": 3.0,
@@ -43,6 +105,7 @@ class SxbidSpider(BaseNoticeSpider):
     @classmethod
     def update_settings(cls, settings) -> None:
         super().update_settings(settings)
+        install_hybrid_pipeline(settings)
         pipelines = settings.getdict("ITEM_PIPELINES")
         pipelines["crawler_scrapy.pipelines.NoticeMultiFormatPipeline"] = None
         pipelines[
@@ -90,6 +153,8 @@ class SxbidSpider(BaseNoticeSpider):
             selected_days, start_date, end_date
         )
         self._counts = {category: 0 for category in self.categories}
+        self._emitted_counts = {category: 0 for category in self.categories}
+        self._existing_counts_loaded = False
         self._seen: set[str] = set()
 
     @staticmethod
@@ -147,8 +212,40 @@ class SxbidSpider(BaseNoticeSpider):
         }
 
     def start_requests(self):
+        self._load_existing_counts()
         for category in self.categories:
-            yield self._list_request(category, 1)
+            if self._emitted_counts[category] < self.max_records:
+                yield self._list_request(category, 1)
+
+    def _load_existing_counts(self) -> None:
+        if self._existing_counts_loaded:
+            return
+        self._existing_counts_loaded = True
+        root = Path(
+            self.crawler.settings.get("NOTICE_OUTPUT_ROOT", "new_output")
+        ).expanduser().resolve()
+        counts = {category: 0 for category in self.categories}
+        for path in (root / self.platform_code / "json").glob("*.json"):
+            try:
+                rows = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            for row in rows if isinstance(rows, list) else ():
+                category = str(row.get("公告子类型") or "") if isinstance(row, Mapping) else ""
+                if category in counts:
+                    counts[category] += 1
+        for category, count in counts.items():
+            self._counts[category] = max(self._counts[category], count)
+            self._emitted_counts[category] = max(
+                self._emitted_counts[category], count
+            )
+
+    def _reserve_output_slot(self, category: str) -> bool:
+        self._load_existing_counts()
+        if self._emitted_counts[category] >= self.max_records:
+            return False
+        self._emitted_counts[category] += 1
+        return True
 
     async def start(self):
         for request in self.start_requests():
@@ -250,6 +347,8 @@ class SxbidSpider(BaseNoticeSpider):
         list_record: Mapping[str, Any],
         list_fingerprint: str,
     ):
+        if not self._reserve_output_slot(category):
+            return
         page = parse_detail_page(response.body, list_record=list_record)
         detail_metadata = self.build_response_metadata(
             response,
@@ -269,6 +368,7 @@ class SxbidSpider(BaseNoticeSpider):
                     "page": page,
                     "detail_body": bytes(response.body),
                     "detail_metadata": detail_metadata,
+                    "quota_reserved": True,
                 },
             )
             return
@@ -292,11 +392,34 @@ class SxbidSpider(BaseNoticeSpider):
         page: ParsedPage,
         detail_body: bytes,
         detail_metadata: Mapping[str, Any],
+        quota_reserved: bool = False,
     ):
+        if not quota_reserved and not self._reserve_output_slot(category):
+            return
         # 定标候选人历史公告多为超宽表格，-layout 会打乱跨页列顺序；
         # 其他六类正文仍使用 -layout，以保留段落和普通表格结构。
         pdf_text_mode = "raw" if category == "final_candidate" else "layout"
         pdf_text = extract_pdf_text(response.body, mode=pdf_text_mode)
+        pdf_metadata = self.build_response_metadata(
+            response,
+            request_kind="notice_body_pdf",
+            context={
+                "category": category,
+                "noticeId": list_record.get("id", ""),
+                "textExtractionMode": pdf_text_mode,
+            },
+        )
+        pdf_metadata["contentSha256"] = hashlib.sha256(response.body).hexdigest()
+        pdf_metadata["contentBytes"] = len(response.body)
+        cached_path = self._cache_body_pdf(
+            category=category,
+            list_record=list_record,
+            page=page,
+            content=bytes(response.body),
+            text_extracted=bool(pdf_text.strip()),
+        )
+        if cached_path:
+            pdf_metadata["storagePath"] = cached_path
         yield self._build_item(
             category=category,
             list_record=list_record,
@@ -305,19 +428,69 @@ class SxbidSpider(BaseNoticeSpider):
             detail_body=detail_body,
             detail_metadata=detail_metadata,
             pdf_text=pdf_text,
-            pdf_metadata=self.build_response_metadata(
-                response,
-                request_kind="notice_body_pdf",
-                context={
-                    "category": category,
-                    "noticeId": list_record.get("id", ""),
-                    "textExtractionMode": pdf_text_mode,
-                },
-            ),
+            pdf_metadata=pdf_metadata,
         )
+
+    def _cache_body_pdf(
+        self,
+        *,
+        category: str,
+        list_record: Mapping[str, Any],
+        page: ParsedPage,
+        content: bytes,
+        text_extracted: bool,
+    ) -> str:
+        """复用公告阶段已取得的 PDF，避免附件阶段再次请求源站。"""
+        if not content or not page.attachments:
+            return ""
+        attachment = next(
+            (
+                value
+                for value in page.attachments
+                if str(value.get("file_url") or "") == page.body_pdf_url
+            ),
+            page.attachments[0],
+        )
+        record = {
+            "平台代码": self.platform_code,
+            "公告类型": config.CATEGORIES[category]["label"],
+            "公告ID": str(list_record.get("id") or ""),
+        }
+        relative_path = attachment_storage_path(record, attachment)
+        output_root = Path(
+            self.crawler.settings.get("NOTICE_OUTPUT_ROOT", "new_output")
+        ).expanduser().resolve()
+        target = output_root / relative_path
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if not target.is_file() or target.stat().st_size != len(content):
+                temporary = target.with_name(f".{target.name}.part")
+                temporary.write_bytes(content)
+                temporary.replace(target)
+        except OSError as exc:
+            self.logger.warning("正文PDF落盘失败 notice=%s: %s", record["公告ID"], exc)
+            return ""
+        attachment.update(
+            {
+                "storage_path": relative_path,
+                "file_hash": hashlib.md5(
+                    content, usedforsecurity=False
+                ).hexdigest(),
+                "file_size_bytes": len(content),
+                "file_type": "application/pdf",
+                "parse_status": (
+                    "TEXT_EXTRACTED" if text_extracted else "DOWNLOADED_NO_OCR"
+                ),
+            }
+        )
+        return relative_path
 
     def parse_body_pdf_error(self, failure):
         values = failure.request.cb_kwargs
+        if not values.get("quota_reserved") and not self._reserve_output_slot(
+            values["category"]
+        ):
+            return
         self.crawler.stats.inc_value("sxbid/body_pdf_failed")
         yield self._build_item(
             category=values["category"],
@@ -378,6 +551,19 @@ class SxbidSpider(BaseNoticeSpider):
                 "region": list_record.get("region", ""),
                 "body_format": "pdf" if page.body_pdf_url else "html",
                 "validation_warnings": parsed.validation_warnings,
+                self.ai_trusted_fields_meta_key: [
+                    field
+                    for field, present in (
+                        ("发布日期", bool(parsed.publish_time)),
+                        ("发布网站", bool(parsed.data.get("发布网站"))),
+                        ("所属行业", bool(parsed.data.get("所属行业"))),
+                        (
+                            "项目类型/行业分类",
+                            bool(parsed.data.get("项目类型/行业分类")),
+                        ),
+                    )
+                    if present
+                ],
             },
             response_metadata={
                 "requestKind": "detail_html_and_body",

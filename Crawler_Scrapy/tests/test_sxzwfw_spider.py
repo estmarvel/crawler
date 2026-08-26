@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date
+import asyncio
 import hashlib
 import inspect
 from pathlib import Path
@@ -24,6 +25,25 @@ DOCS = Path(__file__).parents[1] / "crawler_scrapy" / "docs" / "sxzwfw"
 
 
 class SxzwfwSpiderTest(unittest.TestCase):
+    def test_start_only_schedules_latest_window_per_section(self):
+        spider = SxzwfwSpider(
+            sections="zbjh,zbgg_zys",
+            start_date="2026-01-01",
+            end_date="2026-07-16",
+            max_records=5,
+        )
+
+        async def collect():
+            return [request async for request in spider.start()]
+
+        requests = asyncio.run(collect())
+        self.assertEqual(len(requests), 2)
+        self.assertEqual(
+            {request.cb_kwargs["section"] for request in requests},
+            {"zbjh", "zbgg_zys"},
+        )
+        self.assertTrue(all(request.cb_kwargs["window_index"] == 0 for request in requests))
+
     def test_parse_list_is_regular_callback_without_generator_return_warning(self):
         self.assertFalse(inspect.isgeneratorfunction(SxzwfwSpider.parse_list))
         spider = SxzwfwSpider(sections="zbgg_zys", days=1)
@@ -170,10 +190,7 @@ class SxzwfwSpiderTest(unittest.TestCase):
         self.assertEqual(item["raw_data"]["list"]["notice_id"], "1074678")
         self.assertNotIn("_crawler_list_trace", item["raw_data"]["list"])
         self.assertNotIn("_crawler_list_fingerprint", item["raw_data"]["list"])
-        self.assertEqual(
-            item["raw_data"]["transport"]["list"]["requestForm"]["channelId"],
-            "12",
-        )
+        self.assertNotIn("transport", item["raw_data"])
         self.assertEqual(
             item["response_metadata"]["relatedRequests"]["list"]["requestKind"],
             "list_page",
@@ -225,10 +242,7 @@ class SxzwfwSpiderTest(unittest.TestCase):
         self.assertEqual(attachment_trace["requestKind"], "attachment_metadata")
         self.assertEqual(attachment_trace["context"]["expectedCount"], 1)
         self.assertEqual(attachment_trace["context"]["resolvedCount"], 1)
-        self.assertEqual(
-            result["raw_data"]["transport"]["attachmentMetadata"],
-            attachment_trace,
-        )
+        self.assertNotIn("raw_data", result)
 
     def test_detail_parse_failure_keeps_raw_page_for_diagnosis(self):
         spider = SxzwfwSpider(sections="zbgg_zys", days=1)
@@ -260,9 +274,7 @@ class SxzwfwSpiderTest(unittest.TestCase):
         self.assertEqual(item["parse_status"], "FAILED")
         self.assertEqual(item["raw_html"], page)
         self.assertTrue(item["raw_text"])
-        self.assertEqual(
-            item["raw_data"]["detail"]["parseError"]["type"], "ValueError"
-        )
+        self.assertEqual(item["field_meta"]["parse_error"]["type"], "ValueError")
         self.assertEqual(item["field_meta"]["site_parser"], SxzwfwParser.parser_version)
 
     def test_cms_metadata_failure_is_recorded_in_trace(self):
@@ -278,7 +290,7 @@ class SxzwfwSpiderTest(unittest.TestCase):
             ],
             data={"附件": []},
             response_metadata={},
-            raw_data={"transport": {}},
+            raw_data={},
         )
         request = Request(
             "https://prec.sxzwfw.gov.cn/attachment_url.jspx?cid=123&n=1",
@@ -306,9 +318,7 @@ class SxzwfwSpiderTest(unittest.TestCase):
         self.assertEqual(result["attachments"][0]["parse_status"], "METADATA_FAILED")
         self.assertEqual(trace["requestKind"], "attachment_metadata")
         self.assertEqual(trace["error"]["type"], "TimeoutError")
-        self.assertEqual(
-            result["raw_data"]["transport"]["attachmentMetadata"], trace
-        )
+        self.assertNotIn("transport", result["raw_data"])
 
 
 if __name__ == "__main__":

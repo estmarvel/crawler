@@ -9,6 +9,10 @@ from urllib.parse import urlencode
 from scrapy import Request
 from scrapy.http import Response
 
+from crawler_scrapy.ai.glm52_profile import (
+    GLM52_HYBRID_SETTINGS,
+    install_hybrid_pipeline,
+)
 from crawler_scrapy.schemas.notice_fields import coerce_datetime
 from crawler_scrapy.sites.sxjm import config
 from crawler_scrapy.sites.sxjm.parser import SxjmParser, decrypt_envelope
@@ -24,16 +28,66 @@ class SxjmSpider(BaseNoticeSpider):
     allowed_domains = ["www.sxccdzzcpt.cn"]
     parser_version = SxjmParser.parser_version
     extraction_model_name = "sxjm-site-rule-parser"
+    ai_metadata_key = "sxjmHybridAi"
+    ai_trusted_fields_meta_key = "sxjmApiTrustedFields"
+    ai_log_name = "山西焦煤"
+
+    # SXJM 详情 API 的结构化值继续优先；AI 只在 HTML 规则结果为空、含
+    # HTML、章节越界或候选人/报价错位时动态升级，避免对两万余条历史公告
+    # 无差别调用模型。
+    ai_extract_fields = {
+        "招标计划": (),
+        "资格预审公告": (),
+        "招标公告": (),
+        "中标候选人公示": (),
+        "中标结果公示": (),
+        "更正结果公示": (),
+    }
+    ai_sparse_review_fields = {}
+    ai_candidate_fields = {
+        "招标计划": (
+            "项目名称", "项目编号", "招标编号", "项目总投资", "招标内容",
+            "建设地点", "建设内容及规模", "招标人名称", "行政监督部门",
+        ),
+        "招标公告": (
+            "项目名称", "项目编号", "招标编号", "项目总投资/估算金额",
+            "招标金额", "资金来源", "项目地点", "项目规模", "质量要求",
+            "招标内容与范围", "申请人资格要求/投标人资格要求", "获取方式",
+            "递交方法", "开启地点", "投标保证金方式",
+        ),
+        "资格预审公告": (
+            "项目名称", "项目编号", "招标编号", "项目总投资/估算金额",
+            "招标金额", "资金来源", "项目地点", "项目概况与招标范围",
+            "申请人资格要求/投标人资格要求", "获取方式", "递交方法",
+            "开启地点", "投标保证金方式",
+        ),
+        "中标候选人公示": (
+            "项目名称", "项目编号", "招标编号", "公示时间",
+            "中标候选人名称", "中标候选人报价",
+        ),
+        "中标结果公示": (
+            "项目名称", "项目编号", "招标编号", "中标人名称", "中标价",
+            "联合体成员", "工期", "项目经理", "项目经理证书名称",
+            "项目经理证书编号",
+        ),
+        "更正结果公示": (
+            "项目名称", "项目编号", "招标编号", "开标时间",
+            "标书发售时间", "公告内容", "招标人地址", "招标人联系人",
+            "招标人联系方式", "招标代理机构", "招标代理机构地址",
+            "招标代理机构联系人", "招标代理机构联系方式",
+        ),
+    }
 
     custom_settings = {
+        **GLM52_HYBRID_SETTINGS,
         "ROBOTSTXT_OBEY": False,
         "CONCURRENT_REQUESTS_PER_DOMAIN": 2,
         "DOWNLOAD_DELAY": 0.5,
         "AUTOTHROTTLE_ENABLED": True,
         "AUTOTHROTTLE_TARGET_CONCURRENCY": 1.0,
         # 详情 API 的 content 是源站实际公告 HTML。独立保存该原文，并由
-        # Pipeline 回写 HTML快照路径/SHA256；JSON _trace.rawHtml 同时保留
-        # 可直接导入 MongoDB raw_notices.rawHtml 的副本。
+        # Pipeline 回写 HTML快照路径/SHA256；导入时从独立快照读取并写入
+        # MongoDB raw_notices.rawHtml，结果 JSON 不再重复内嵌 HTML。
         "NOTICE_SNAPSHOT_ENABLED": True,
         # 极少数源站记录可能只有结构化字段而没有 content；不能因此丢掉
         # 整条公告，空 HTML 由 Pipeline 告警并保留原始 JSON payload。
@@ -46,6 +100,8 @@ class SxjmSpider(BaseNoticeSpider):
         """替换最终导出器，并为服务器本机直连启用限流保护。"""
 
         super().update_settings(settings)
+        pipelines = settings.getdict("ITEM_PIPELINES")
+        install_hybrid_pipeline(settings)
         pipelines = settings.getdict("ITEM_PIPELINES")
         pipelines["crawler_scrapy.pipelines.NoticeMultiFormatPipeline"] = None
         pipelines[
@@ -228,7 +284,6 @@ class SxjmSpider(BaseNoticeSpider):
                 "announcement_type": announcement_type,
                 "page": page,
             },
-            dont_filter=True,
         )
 
     @staticmethod
@@ -411,6 +466,12 @@ class SxjmSpider(BaseNoticeSpider):
             response_metadata["listBusinessEnvelope"] = list_trace.get(
                 "businessEnvelope"
             )
+        source_notice_nature = SxjmParser.source_notice_nature(
+            channel,
+            section,
+            announcement_type,
+            str(detail.get("title") or detail.get("project_name") or ""),
+        )
         yield self.build_notice_item(
             notice_type=notice_type,
             notice_subtype=f"{channel}.{subtype}",
@@ -422,10 +483,6 @@ class SxjmSpider(BaseNoticeSpider):
             raw_data={
                 "list": source_list,
                 "detail": source_detail,
-                "transport": {
-                    "list": list_trace,
-                    "detailEnvelope": response_metadata["businessEnvelope"],
-                },
             },
             raw_html=raw_html,
             raw_text=SxjmParser.raw_text(detail),
@@ -436,15 +493,32 @@ class SxjmSpider(BaseNoticeSpider):
                 "site_parser": self.parser_version,
                 "channel": channel,
                 "section": section,
-                "source_notice_type": config.source_notice_type(section),
+                "source_notice_type": (
+                    "资格预审公告"
+                    if notice_type == "资格预审公告"
+                    else source_notice_nature
+                    if notice_type == "更正结果公示"
+                    else config.source_notice_type(section)
+                ),
                 "source_section_label": config.section_label(channel, section),
                 "source_announcement_type": str(announcement_type),
                 "source_announcement_type_label": config.announcement_type_label(
                     announcement_type
                 ),
-                "source_notice_nature": data.get("源站公告性质", ""),
-                "schema_notice_type": config.schema_notice_type(section),
+                "source_notice_nature": source_notice_nature,
+                "schema_notice_type": notice_type,
                 "detail_source": "decrypted_detail_api",
+                "sxjmApiTrustedFields": [
+                    field
+                    for field, present in (
+                        ("发布日期", bool(self._source_publish_time(detail))),
+                        ("项目性质", True),
+                        ("所属行业", bool(detail.get("industry_category"))),
+                        ("项目编号", bool(detail.get("invest_project_code"))),
+                        ("招标编号", bool(detail.get("tender_number"))),
+                    )
+                    if present
+                ],
             },
             source_list_fingerprint=list_fingerprint,
             attachments=attachments,

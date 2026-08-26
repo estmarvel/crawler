@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import re
 from collections import Counter
@@ -12,6 +11,7 @@ from typing import Any, Mapping
 from urllib.parse import urlsplit
 
 from crawler_scrapy.sites.sxzwfw import config
+from crawler_scrapy.storage.source_snapshots import load_record_html
 
 
 def _text(value: Any) -> str:
@@ -63,22 +63,21 @@ def audit_record(record: Mapping[str, Any], output_root: Path) -> dict[str, Any]
         errors.append("详情页链接为空")
     if not body:
         errors.append("公告正文为空")
-    if body != _text(trace.get("rawText")):
-        errors.append("公告正文与 _trace.rawText 不一致")
-    if not _text(trace.get("rawHtml")):
-        errors.append("_trace.rawHtml 为空")
+    try:
+        raw_html = load_record_html(record, output_root)
+    except ValueError as exc:
+        raw_html = ""
+        errors.append(str(exc))
+    if not raw_html:
+        errors.append("HTML快照内容为空")
 
     snapshot_value = _text(record.get("HTML快照路径"))
     snapshot_path = output_root / snapshot_value if snapshot_value else None
     if not snapshot_value or snapshot_path is None or not snapshot_path.is_file():
         errors.append("HTML快照不存在")
-    else:
-        actual = hashlib.sha256(snapshot_path.read_bytes()).hexdigest()
-        if actual != _text(record.get("HTML快照SHA256")):
-            errors.append("HTML快照 SHA256 不一致")
 
-    if schema_subtype == "zzgg" and _text(record.get("公告类型")) != "TERMINATION":
-        errors.append("终止/废标公告未导出为 TERMINATION")
+    if schema_subtype == "gzjg" and _text(record.get("公告类型")) != "CORRECTION":
+        errors.append("更正/终止/废标公告未导出为 CORRECTION")
     for key in ("中标候选人名称", "中标人名称"):
         values = record.get(key) or []
         if not isinstance(values, list):

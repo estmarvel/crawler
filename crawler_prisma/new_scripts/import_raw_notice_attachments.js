@@ -26,9 +26,9 @@ function printHelp() {
 
 Options:
   --commit                 Upload files to MinIO and write MySQL metadata.
-  --site=<site>            all, sxjm, sxzwfw, bitbid, huaxin, or jiubang.
+  --site=<site>            all or any configured crawler site.
   --output-root=<path>     Crawler output root.
-  --api-root=<path>        Project recommendation API directory.
+  --env-file=<path>        crawler_prisma environment file (default: .env).
   --allow-missing-files    Keep metadata with storage_provider=SOURCE when a
                            JSON attachment has no readable local file.
   --help                   Show this help.
@@ -57,6 +57,26 @@ function identity(row) {
         : `name:${row.fileName}`;
 }
 
+function databaseFileType(value, fileName) {
+  const source = nullableString(value)?.split(";", 1)[0].trim().toLowerCase() || null;
+  if (!source || [...source].length <= 32) return source;
+  const extension = path.extname(String(fileName || "")).slice(1).toLowerCase();
+  const aliases = {
+    docx: "application/docx",
+    xlsx: "application/xlsx",
+    pptx: "application/pptx",
+    docm: "application/docm",
+    xlsm: "application/xlsm",
+    pptm: "application/pptm",
+    odt: "application/odt",
+    ods: "application/ods",
+    odp: "application/odp",
+  };
+  // raw_notice_attachment.file_type 只有 VARCHAR(32)。完整 MIME 仍保留在
+  // JSON 和 MinIO 对象 Content-Type 中，MySQL 使用可读、确定的短别名。
+  return aliases[extension] || "application/octet-stream";
+}
+
 function mapAttachments(loaded, outputRoot, allowMissingFiles) {
   const rows = [];
   for (const record of loaded.records) {
@@ -78,7 +98,8 @@ function mapAttachments(loaded, outputRoot, allowMissingFiles) {
         storagePath: nullableString(source.storage_path),
         fileHash: nullableString(source.file_hash),
         declaredFileSize: bigintValue(source.file_size_bytes, "file_size_bytes", context),
-        fileType: nullableString(source.file_type),
+        sourceFileType: nullableString(source.file_type),
+        fileType: databaseFileType(source.file_type, source.file_name),
         parseStatus: (nullableString(source.parse_status) || "PENDING").toUpperCase(),
         publishDate: parseCrawlerDate(
           record.source["发布时间"] ?? record.source["发布日期"],
@@ -179,7 +200,7 @@ async function importOne(stores, row, parent) {
         fs.createReadStream(row.absolutePath),
         Number(row.actualFileSize),
         {
-          "Content-Type": row.fileType || "application/octet-stream",
+          "Content-Type": row.sourceFileType || row.fileType || "application/octet-stream",
           "X-Amz-Meta-Attachment-Uid": uid,
           "X-Amz-Meta-Raw-Notice-Uid": parent.uid,
           "X-Amz-Meta-Source-File-Id": row.sourceFileId || "",
@@ -220,7 +241,7 @@ async function main() {
   if (options.help) return printHelp();
   console.log(`Mode: ${options.commit ? "COMMIT" : "DRY RUN (no storage writes)"}`);
   console.log(`Validated JSON files: ${jsonNoticeFiles(options.outputRoot, options.sites).length}`);
-  const stores = options.commit ? await openStores(options.apiRoot, { minio: true }) : null;
+  const stores = options.commit ? await openStores(options.envFile, { minio: true }) : null;
   try {
     if (stores && !await stores.minio.bucketExists(stores.bucketName)) {
       await stores.minio.makeBucket(stores.bucketName);
@@ -270,7 +291,15 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  console.error(`Import failed: ${error.stack || error.message}`);
-  process.exitCode = 1;
-});
+if (require.main === module) {
+  main().catch((error) => {
+    console.error(`Import failed: ${error.stack || error.message}`);
+    process.exitCode = 1;
+  });
+}
+
+module.exports = {
+  databaseFileType,
+  mapAttachments,
+  mapRecordAttachments,
+};

@@ -81,11 +81,16 @@ def clean_html_keep_lines(value: Any) -> str:
 
 
 class SxjmParser:
-    parser_version = "sxjm-v12-unique-identifiers"
+    parser_version = "sxjm-v16-spaced-time-normalization"
 
     """完全按山西焦煤详情接口和正文模板解析公告。"""
 
     PROJECT_TYPES = {"10": "货物", "20": "工程", "30": "服务"}
+    PROJECT_NATURES = {
+        "yfxm": "依法必须招标",
+        "fzxm": "非依法招标",
+        "jycg": "非依法招标",
+    }
 
     @classmethod
     def parse(
@@ -94,15 +99,18 @@ class SxjmParser:
         # 返回真实源站栏目，而不是把 cggg/cjhxr/cjgg 改名成
         # zbgg/hxr/zbjg。字段结构可以复用，公告性质必须保持可区分。
         subtype = section
-        notice_type = config.schema_notice_type(section)
+        title = cls._string(detail.get("title") or detail.get("project_name"))
+        notice_type = cls._schema_notice_type(section, title)
         data = create_empty_notice_data(
             notice_type, include_parser_diagnostics=True
         )
         text = cls.raw_text(detail)
         cls._fill_common(channel, section, data, detail, text)
-        if section == "zbjh":
+        if notice_type == "更正结果公示":
+            cls._fill_correction(data, detail, text, title)
+        elif section == "zbjh":
             cls._fill_plan(data, detail, text)
-        elif section in {"zbgg", "cggg", "zzgg"}:
+        elif section in {"zbgg", "cggg"}:
             cls._fill_tender(data, detail, text)
         elif section in {"hxr", "cjhxr"}:
             cls._fill_candidates(data, detail, text)
@@ -110,6 +118,27 @@ class SxjmParser:
             cls._fill_award(data, detail, text)
         attachments = cls.attachments(detail)
         return subtype, notice_type, data, attachments
+
+    @classmethod
+    def _schema_notice_type(cls, section: str, title: str) -> str:
+        compact = re.sub(r"\s+", "", title)
+        if section == "zzgg" or (
+            section in {"zbgg", "cggg"}
+            and any(
+                keyword in compact
+                for keyword in (
+                    "变更公告", "更正公告", "澄清公告", "延期公告",
+                    "终止公告", "暂停公告", "撤销公告", "流标公告", "废标公告",
+                    "撤销（终止）", "撤销(终止)",
+                )
+            )
+        ):
+            return "更正结果公示"
+        if section in {"zbgg", "cggg"} and any(
+            keyword in compact for keyword in ("资格预审", "资审公告")
+        ):
+            return "资格预审公告"
+        return config.schema_notice_type(section)
 
     @classmethod
     def _fill_common(
@@ -125,7 +154,10 @@ class SxjmParser:
             detail.get("publish_time_format"), detail.get("created_at_format")
         )
         common = {
-            "项目性质": config.channel_label(channel),
+            # “招标项目”“简易采购限额以下”是源站频道，不是数据库允许的
+            # 项目性质枚举。依法/非依法频道可确定映射，普通“招标项目”
+            # 没有充分证据时留空，源频道仍保存在 fieldMeta.channel。
+            "项目性质": cls.PROJECT_NATURES.get(channel, ""),
             "源站公告性质": cls.source_notice_nature(
                 channel,
                 section,
@@ -136,7 +168,7 @@ class SxjmParser:
             "项目名称": cls._project_name(detail, title),
             "项目编号": cls._project_identifier(detail, text),
             "招标编号": cls._tender_identifier(detail, text),
-            "所属行业": cls._string(detail.get("industry_category")),
+            "所属行业": cls._industry(detail.get("industry_category")),
             "组织形式": cls._organization(detail, text),
             "发布日期": publish_time,
             "发布网站": config.PLATFORM_NAME,
@@ -151,15 +183,19 @@ class SxjmParser:
     ) -> None:
         values = {
             "招标方式": detail.get("tender_mode") or cls._label(text, "招标方式"),
-            "项目名称": cls._label(text, "项目名称") or cls._project_name(
-                detail, cls._string(detail.get("project_name") or detail.get("title"))
+            "项目名称": cls._project_name(
+                detail,
+                cls._label(text, "项目名称")
+                or cls._string(detail.get("project_name") or detail.get("title")),
             ),
             "项目类型": detail.get("type_project") or cls._label(text, "项目类型"),
             "项目总投资": detail.get("contribution_scale") or cls._label(text, "项目总投资"),
             "招标内容": detail.get("tender_content") or cls._label(text, "招标内容"),
             "招标人名称": detail.get("legal_person") or cls._label(text, "招标人名称", "招标人"),
             "行政监督部门": detail.get("supervise_dept_name") or cls._label(text, "行政监督部门"),
-            "建设地点": detail.get("project_address") or cls._label(text, "建设地点"),
+            "建设地点": cls._clean_plan_location(
+                detail.get("project_address") or cls._label(text, "建设地点")
+            ),
             "建设内容及规模": detail.get("project_scale") or cls._label(text, "建设内容及规模"),
             "招标公告（资格预审公告）预计发布时间": (
                 detail.get("notice_plan_send_time")
@@ -168,6 +204,107 @@ class SxjmParser:
         }
         for field, value in values.items():
             data[field] = cls._string(value).strip(" ;；")
+
+    @staticmethod
+    def _clean_plan_location(value: Any) -> str:
+        result = str(value or "").strip(" ：:;；")
+        # 源站个别计划值自身又带了一次“四、”，结构化地点不能保留章节号。
+        return re.sub(r"^[一二三四五六七八九十百]+[、.．]\s*", "", result)
+
+    @staticmethod
+    def _clean_project_scale(value: Any) -> str:
+        result = str(value or "").strip(" ：:;；")
+        if re.sub(r"\s+", "", result) in {
+            "标段", "标段号", "序号", "项目规模", "建设规模", "采购项目概况",
+        }:
+            return ""
+        return result
+
+    @classmethod
+    def _project_scale(cls, text: str) -> str:
+        """保留“项目概况”中的真实设备/工程表，拒绝只取到表头“标段”。"""
+
+        section = cls._section(
+            text,
+            ("采购项目概况", "项目概况", "项目规模", "建设规模"),
+            (
+                "采购范围及相关要求", "项目概况与招标范围",
+                "采购范围", "招标范围", "供应商资格要求",
+                "投标人资格要求", "申请人资格要求",
+            ),
+        )
+        return cls._clean_project_scale(section)
+
+    @classmethod
+    def _tender_scope(cls, text: str) -> str:
+        """优先取明确的招标/采购范围小节，并在地点、期限等同级字段前停止。"""
+
+        lines = [re.sub(r"\s+", " ", line).strip() for line in text.splitlines()]
+        labels = ("采购范围及相关要求", "招标内容与范围", "采购范围", "招标范围")
+        for index, line in enumerate(lines):
+            match = re.match(
+                r"^(?P<number>\d+(?:\.\d+)*)?[、.．]?\s*"
+                rf"(?:{'|'.join(re.escape(label) for label in labels)})"
+                r"\s*[：:]\s*(?P<value>.*)$",
+                line,
+            )
+            if not match:
+                continue
+            selected = [match.group("value").strip()] if match.group("value").strip() else []
+            number = [int(value) for value in (match.group("number") or "").split(".") if value]
+            for following in lines[index + 1 :]:
+                if not following:
+                    continue
+                if re.match(
+                    r"^(?:[一二三四五六七八九十百]+[、.．]|\d+[、.．])\s*"
+                    r"(?:供应商|投标人|申请人|采购文件|招标文件|响应文件|投标文件)",
+                    following,
+                ):
+                    break
+                next_number = re.match(r"^(\d+(?:\.\d+)*)[、.．]?\s*", following)
+                # 001/004 等是标段编码，不是“第1章/第4章”。
+                is_lot_code = bool(
+                    next_number and re.fullmatch(r"\d{3}", next_number.group(1))
+                )
+                if next_number and number and not is_lot_code:
+                    parts = [int(value) for value in next_number.group(1).split(".")]
+                    if (
+                        len(parts) == len(number)
+                        and parts[:-1] == number[:-1]
+                        and parts[-1] > number[-1]
+                    ) or (len(parts) < len(number) and parts[0] > number[0]):
+                        break
+                if re.match(
+                    r"^(?:服务地点|交货地点|建设地点|项目地点|服务期限|服务期|"
+                    r"交货期|供货期|工期|质量要求|质量标准|服务标准)\s*[：:]",
+                    following,
+                ):
+                    continue
+                selected.append(following)
+            return "\n".join(selected).strip()
+        return cls._section(
+            text,
+            ("项目概况与招标范围",),
+            (
+                "供应商资格要求", "投标人资格要求", "申请人资格要求",
+                "采购文件的获取", "招标文件的获取",
+            ),
+        )
+
+    @classmethod
+    def _acquisition_method(cls, text: str) -> str:
+        # “获取方式”是操作字段；时间、平台费、联系人和客服电话分别属于
+        # 其他字段，不能因为位于同一“文件获取”大章就整体写入。
+        value = cls._label(text, "获取方式", "获取方法")
+        if value:
+            return value
+        section = cls._section(
+            text,
+            ("采购文件的获取", "招标文件的获取", "资格预审文件的获取"),
+            ("响应文件的递交", "投标文件的递交", "开标时间和地点"),
+        )
+        labelled = cls._label(section, "获取方式", "获取方法")
+        return labelled
 
     @classmethod
     def _fill_tender(
@@ -178,26 +315,27 @@ class SxjmParser:
         acquisition = cls._range(
             detail.get("sale_begin_time_format"), detail.get("sale_end_time_format")
         )
-        scope = cls._section(
-            text,
-            ("采购范围及相关要求", "采购范围", "招标范围", "项目概况与招标范围"),
-            (
-                "供应商资格要求", "供应商资质要求", "投标人资格要求",
-                "投标人资质要求", "申请人资格要求", "采购文件的获取", "招标文件的获取",
-            ),
-        )
+        scope = cls._tender_scope(text)
         qualification = cls._section(
             text,
             ("供应商资格要求", "供应商资质要求", "投标人资格要求", "申请人资格要求"),
             (
-                "采购文件的获取", "招标文件的获取", "获取时间", "获取方式",
-                "响应文件的递交", "投标文件的递交",
+                "采购文件的获取", "招标文件的获取", "资格预审文件的获取",
+                "资格预审文件获取", "获取时间", "获取方式",
+                "响应文件的递交", "投标文件的递交", "资格预审申请文件的递交",
             ),
+        )
+        scope_field = (
+            "项目概况与招标范围"
+            if "项目概况与招标范围" in data
+            else "招标内容与范围"
         )
         values = {
             "开标时间": opening,
             "项目编号/招标编号": cls._project_number(detail, text),
-            "项目类型/行业分类": project_type or detail.get("industry_category"),
+            "项目类型/行业分类": project_type or cls._industry(
+                detail.get("industry_category")
+            ),
             "项目总投资/估算金额": cls._label(text, "项目总投资", "估算金额", "项目估算"),
             "招标金额": cls._label(text, "招标金额", "最高限价", "最高投标限价", "采购预算"),
             "资金来源": cls._funding(text),
@@ -205,24 +343,26 @@ class SxjmParser:
                 text, "项目地点", "建设地点", "服务地点", "交货地点", "实施地点"
             ) or detail.get("region"),
             "招标人/采购人名称": cls._purchaser(detail, text),
-            "项目规模": cls._label(text, "项目规模", "建设规模", "采购项目概况", "项目概况"),
+            "项目规模": cls._project_scale(text),
             "工期/服务期/供货日期": cls._label(
                 text, "合同履行期限", "履约期限", "工期", "计划工期",
                 "项目服务期限", "服务期限", "服务周期", "服务期",
                 "供货期限", "供货期", "交货期限", "交货期"
             ),
             "质量要求": cls._label(
-                text, "质量要求或服务标准", "质量要求", "质量标准", "服务标准", "其他要求"
+                text, "质量要求或服务标准", "质量要求", "质量标准", "服务标准"
             ),
-            "招标内容与范围": scope,
+            scope_field: scope,
             "申请人资格要求/投标人资格要求": qualification,
             "预审文件获取时间": acquisition,
-            "获取方式": cls._section(
+            "获取方式": cls._acquisition_method(text),
+            "递交截止时间": cls._label(
                 text,
-                ("采购文件的获取", "招标文件的获取", "文件的获取"),
-                ("响应文件的递交", "投标文件的递交", "递交响应文件", "开启方式和地点", "开标时间和地点"),
-            ) or cls._label(text, "获取方式", "获取方法"),
-            "递交截止时间": opening or cls._label(text, "递交截止时间", "响应文件递交截止时间"),
+                "递交截止时间",
+                "响应文件递交截止时间",
+                "递交响应文件截止时间",
+                "递交截止及开启时间",
+            ) or opening,
             "递交方法": cls._label(text, "递交方法", "递交方式", "递交地址", "递交地点"),
             "开启时间": opening,
             "开启方式": cls._opening_method(text),
@@ -255,11 +395,114 @@ class SxjmParser:
         data["招标编号/项目编号"] = cls._project_number(detail, text)
         data["中标候选人明细"] = details
         data["中标候选人名称"] = [item["候选人名称"] for item in details]
-        prices = [item["候选人报价"] for item in details]
-        data["中标候选人报价"] = (
-            prices if any(value not in (None, "") for value in prices) else []
-        )
+        # 名称与报价必须保持同索引；源站未公布报价时使用 None，不能把整列
+        # 变成空数组，否则后续无法判断“未公布”对应的是哪一个候选人，也会
+        # 无意义地触发 AI 列表错位复核。
+        data["中标候选人报价"] = [
+            item["候选人报价"] if item["候选人报价"] not in (None, "") else None
+            for item in details
+        ]
         cls._fill_contacts(data, detail, text)
+
+    @classmethod
+    def _fill_correction(
+        cls,
+        data: dict[str, Any],
+        detail: Mapping[str, Any],
+        text: str,
+        title: str,
+    ) -> None:
+        data["公共类型"] = cls._correction_type(title)
+        data["开标时间"] = cls._last_label(
+            text, "变更后开标时间", "更正后开标时间", "开标时间"
+        ) or cls._string(detail.get("bid_opening_date_format"))
+        data["标书发售时间"] = cls._range(
+            detail.get("sale_begin_time_format"), detail.get("sale_end_time_format")
+        ) or cls._label(text, "变更后招标文件获取时间", "招标文件获取时间", "标书发售时间")
+        data["公告内容"] = cls._correction_content(text)
+        data["监督部门地址"] = cls._label(text, "监督部门地址")
+        data["监督部门联系人"] = cls._label(text, "监督部门联系人")
+        data["监督部门联系方式"] = cls._label(
+            text, "监督部门联系方式", "监督部门联系电话"
+        )
+        data["依据文件"] = cls._label(text, "依据文件")
+        data["依据文号"] = cls._label(text, "依据文号")
+        cls._fill_contacts(data, detail, text)
+
+    @staticmethod
+    def _correction_type(title: str) -> str:
+        compact = re.sub(r"\s+", "", title)
+        for keyword, value in (
+            ("更正", "更正公告"),
+            ("变更", "变更公告"),
+            ("澄清", "澄清公告"),
+            ("延期", "延期公告"),
+            ("流标", "流标公告"),
+            ("废标", "废标公告"),
+            ("撤销", "撤销公告"),
+            ("终止", "终止公告"),
+            ("暂停", "其他"),
+        ):
+            if keyword in compact:
+                return value
+        return "其他"
+
+    @classmethod
+    def _correction_content(cls, text: str) -> str:
+        headings = (
+            "招标终止原因", "采购终止原因", "终止原因", "暂停原因",
+            "撤销原因", "流标原因", "废标原因", "变更内容", "更正内容",
+            "澄清内容", "延期内容", "公告内容", "内容",
+        )
+        lines = [re.sub(r"\s+", " ", line).strip() for line in text.splitlines()]
+        start = -1
+        start_number: int | None = None
+        for index, line in enumerate(lines):
+            match = re.match(
+                r"^([一二三四五六七八九十\d]+)[、.．]\s*(.+?)\s*[：:]?$",
+                line,
+            )
+            label = match.group(2).strip() if match else line.strip(" ：:")
+            if label not in headings:
+                continue
+            start = index
+            start_number = cls._section_number(match.group(1)) if match else None
+            break
+        if start >= 0:
+            selected: list[str] = []
+            for line in lines[start + 1 :]:
+                match = re.match(
+                    r"^([一二三四五六七八九十\d]+)[、.．]\s*"
+                    r"(监督部门|联系方式)\s*[：:]?$",
+                    line,
+                )
+                if match:
+                    section_number = cls._section_number(match.group(1))
+                    if start_number is None or (
+                        section_number is not None
+                        and section_number in {start_number + 1, start_number + 2}
+                    ):
+                        break
+                if line:
+                    selected.append(line)
+            if selected:
+                return "\n".join(selected).strip()
+        return cls._label(
+            text,
+            "招标终止原因", "采购终止原因", "终止原因", "暂停原因",
+            "撤销原因", "流标原因", "废标原因", "变更内容", "更正内容",
+            "澄清内容", "延期内容", "公告内容", "内容",
+        )
+
+    @staticmethod
+    def _section_number(value: str) -> int | None:
+        if value.isdigit():
+            return int(value)
+        numbers = {
+            "一": 1, "二": 2, "三": 3, "四": 4, "五": 5,
+            "六": 6, "七": 7, "八": 8, "九": 9, "十": 10,
+        }
+        return numbers.get(value)
 
     @classmethod
     def _fill_award(
@@ -271,10 +514,10 @@ class SxjmParser:
         data["招标方式"] = cls._procurement_method(detail, text)
         data["中标结果明细"] = details
         data["中标人名称"] = [item["中标人名称"] for item in details]
-        prices = [item["中标价"] for item in details]
-        data["中标价"] = (
-            prices if any(value not in (None, "") for value in prices) else []
-        )
+        data["中标价"] = [
+            item["中标价"] if item["中标价"] not in (None, "") else None
+            for item in details
+        ]
         data["联合体成员"] = cls._string_list(
             cls._label(text, "联合体成员", "联合体成员名称")
         )
@@ -296,7 +539,11 @@ class SxjmParser:
     ) -> None:
         contacts = cls._contacts(text)
         bidder_name = contacts["bidder"].get("name") or cls._purchaser(detail, text)
-        agent_name = contacts["agent"].get("name") or cls._string(detail.get("tendering_agency"))
+        # 正文明确标注为代理机构的名称可信；详情接口 tendering_agency 偶尔
+        # 返回经办人/内部账号（如“王国玺(FX)”），仅在具备组织名称特征时回退。
+        agent_name = contacts["agent"].get("name") or cls._organization_name(
+            detail.get("tendering_agency")
+        )
         values = {
             "招标人/采购人名称": bidder_name,
             "招标人/采购人": bidder_name,
@@ -374,8 +621,9 @@ class SxjmParser:
             "候选人名称", "候选供应商名称", "入围候选供应商名称",
             "入围供应商名称",
         ) if candidate else (
-            "中标人名称", "成交人名称", "成交(入围)人名称", "成交（入围）人名称",
-            "成交单位", "成交供应商名称", "供应商名称"
+            "中标人名称", "中标单位名称", "中标候选人名称", "成交人名称",
+            "成交(入围)人名称", "成交（入围）人名称", "成交单位",
+            "成交供应商名称", "供应商名称"
         )
         section = ""
         details: list[dict[str, Any]] = []
@@ -424,8 +672,9 @@ class SxjmParser:
             "候选人名称", "候选供应商名称", "入围候选供应商名称",
             "入围供应商名称",
         ) if candidate else (
-            "中标人名称", "成交人名称", "成交(入围)人名称", "成交（入围）人名称",
-            "成交单位", "成交供应商名称", "供应商名称"
+            "中标人名称", "中标单位名称", "中标候选人名称", "成交人名称",
+            "成交(入围)人名称", "成交（入围）人名称", "成交单位",
+            "成交供应商名称", "供应商名称"
         )
         price_words = (
             "报价", "投标价", "响应报价", "成交价", "中标价", "成交金额", "中标金额"
@@ -570,6 +819,24 @@ class SxjmParser:
                     return candidate
         return ""
 
+    @classmethod
+    def _last_label(cls, text: str, *labels: str) -> str:
+        """返回正文中最后一个明确标签值，适用于更正后的最终有效时间。"""
+
+        matches: list[str] = []
+        for line in text.splitlines():
+            normalized = re.sub(
+                r"^[一二三四五六七八九十百\d.、（）()\s]+", "", line
+            ).strip()
+            for label in labels:
+                label_pattern = r"\s*".join(re.escape(char) for char in label)
+                match = re.match(rf"{label_pattern}\s*[：:]\s*(.+)$", normalized)
+                if match:
+                    value = match.group(1).strip(" ：:。；;")
+                    if value:
+                        matches.append(value)
+        return matches[-1] if matches else ""
+
     @staticmethod
     def source_notice_nature(
         channel: str,
@@ -588,7 +855,9 @@ class SxjmParser:
             ("延期", "延期公告"),
             ("变更", "变更公告"),
             ("更正", "更正公告"),
+            ("暂停", "暂停公告"),
             ("资格预审", "资格预审公告"),
+            ("资审公告", "资格预审公告"),
             ("补充", "补充公告"),
             ("澄清", "澄清公告"),
         ):
@@ -653,7 +922,9 @@ class SxjmParser:
                 selected.append(match.group(1).strip())
                 break
         for line in lines[start + 1 :]:
-            if selected and any(x in line for x in ends):
+            # 即使目标章节为空，遇到下一章节也必须立即停止；旧逻辑要求
+            # selected 非空，导致空“采购范围”把整段资格要求误存为招标范围。
+            if any(x in line for x in ends):
                 break
             if line:
                 selected.append(line)
@@ -661,19 +932,22 @@ class SxjmParser:
 
     @classmethod
     def _project_number(cls, detail: Mapping[str, Any], text: str) -> str:
-        body = cls._label(text, "项目编号", "招标项目编号", "招标编号", "采购编号")
-        return body or cls._string(detail.get("tender_number") or detail.get("code"))
+        values = (
+            cls._project_identifier(detail, text),
+            cls._tender_identifier(detail, text),
+        )
+        return "；".join(dict.fromkeys(value for value in values if value))
 
     @classmethod
     def _project_identifier(cls, detail: Mapping[str, Any], text: str) -> str:
         """提取项目主标识，不把仅标注为“招标编号”的值误写为项目编号。"""
 
-        body = cls._label(
+        body = cls._identifier_by_labels(
             text,
-            "项目编号",
             "招标项目编号",
             "投资项目统一代码",
             "项目代码",
+            "项目编号",
         )
         return cls._identifier_token(body) or cls._identifier_token(
             detail.get("invest_project_code")
@@ -683,10 +957,35 @@ class SxjmParser:
     def _tender_identifier(cls, detail: Mapping[str, Any], text: str) -> str:
         """提取招标/采购编号；接口 tender_number 只作为正文缺失时的回退。"""
 
-        body = cls._label(text, "招标编号", "采购编号")
+        body = cls._identifier_by_labels(text, "招标编号", "采购编号")
         return cls._identifier_token(body) or cls._identifier_token(
             detail.get("tender_number")
         )
+
+    @classmethod
+    def _identifier_by_labels(cls, text: str, *labels: str) -> str:
+        """按语义优先级提取行内或独立行编号，不受正文句式影响。"""
+
+        for label in labels:
+            match = re.search(
+                rf"{re.escape(label)}\s*[：:]\s*([^\s，,。；;]+)", text
+            )
+            if match:
+                value = cls._identifier_token(match.group(1))
+                if value:
+                    return value
+            lines = [
+                re.sub(r"^[一二三四五六七八九十百\d.、（）()\s]+", "", line).strip()
+                for line in text.splitlines()
+            ]
+            for index, line in enumerate(lines[:-1]):
+                if line.rstrip("：:") != label:
+                    continue
+                for following in lines[index + 1 : index + 3]:
+                    value = cls._identifier_token(following)
+                    if value:
+                        return value
+        return ""
 
     @staticmethod
     def _identifier_token(value: Any) -> str:
@@ -697,9 +996,15 @@ class SxjmParser:
         if not match:
             return ""
         candidate = match.group(0).strip("._/-")
+        for opening, closing in (("(", ")"), ("（", "）"), ("[", "]"), ("【", "】")):
+            while candidate.endswith(closing) and candidate.count(opening) < candidate.count(closing):
+                candidate = candidate[:-1].rstrip()
         # SXJM 的 tender_number 偶尔只是机构/业务前缀（如 SJZBXS、fxkygyhw），
         # 不具备公告级唯一性，不能用于数据库项目关联。完整编号至少包含数字。
         if not re.search(r"\d", candidate):
+            return ""
+        # 招标计划模板会用全零代码占位；它没有关联价值，不能成为 Project 主键。
+        if re.fullmatch(r"0+(?:[-._/]0+)+", candidate):
             return ""
         if not all(
             candidate.count(opening) == candidate.count(closing)
@@ -711,13 +1016,51 @@ class SxjmParser:
     @classmethod
     def _project_name(cls, detail: Mapping[str, Any], title: str) -> str:
         value = cls._string(detail.get("project_name")) or title
-        return re.sub(
-            r"(?:招标计划(?:变更)?公告|二次招标公告|招标公告|采购(?:二次)?公告|项目公告|"
-            r"中标候选人公示(?:更正)?|成交候选人公示|中标结果公示|成交结果公告|"
-            r"成交公告|结果发布|招标终止公告|采购终止公告|终止公告)(?:（.*?）)?$",
+        value = re.sub(
+            r"(?:招标计划(?:变更)?公告|资格预审公告|二次招标公告|招标公告|"
+            r"采购(?:二次)?公告|项目公告|中标候选人公示(?:更正)?|"
+            r"成交候选人公示|中标结果公示|成交结果公告|成交公告|结果发布|"
+            r"(?:招标|采购)?(?:第?\s*[一二三四五六七八九十\d]+\s*次)?"
+            r"(?:暂停|终止|撤销|延期|变更|更正|澄清|补充|答疑)公告|"
+            r"终止公告)(?:（.*?）)?$",
             "",
             value,
         ).strip()
+        # 轮次属于公告阶段，不属于项目实体名称。仅删除有括号边界的前后
+        # 轮次标记，避免把“二次供水工程”等真实项目名误删。
+        round_marker = r"(?:第?\s*[一二三四五六七八九十\d]+\s*次(?:招标|采购)?|重新招标)"
+        value = re.sub(
+            rf"^(?:[【\[（(]\s*{round_marker}\s*[】\]）)]\s*)+",
+            "",
+            value,
+        )
+        value = re.sub(
+            rf"(?:\s*[【\[（(]\s*{round_marker}\s*[】\]）)])+$",
+            "",
+            value,
+        )
+        value = re.sub(rf"\s*{round_marker}$", "", value)
+        # 不能用 strip 删除括号字符：项目名称本身可能合法地以
+        # “（002标段）”“（第一批）”结尾。
+        return value.strip(" -—_")
+
+    @classmethod
+    def _organization_name(cls, value: Any) -> str:
+        """仅接受可识别为组织实体的接口代理机构名称。"""
+
+        result = cls._string(value)
+        if not result or result in {"无", "/", "-", "暂无"}:
+            return ""
+        organization_markers = (
+            "公司", "集团", "中心", "事务所", "研究院", "研究所",
+            "招标代理", "采购代理", "工程咨询", "项目管理", "工程管理",
+        )
+        return result if any(marker in result for marker in organization_markers) else ""
+
+    @classmethod
+    def _industry(cls, value: Any) -> str:
+        result = cls._string(value)
+        return "" if result in {"无", "/", "-", "暂无"} else result
 
     @classmethod
     def _purchaser(cls, detail: Mapping[str, Any], text: str) -> str:
@@ -746,8 +1089,8 @@ class SxjmParser:
             return "自行招标"
         if "委托" in method:
             return "委托招标"
-        agency = cls._string(detail.get("tendering_agency"))
-        return "委托招标" if any(x in agency for x in ("公司", "中心", "机构")) else ""
+        agency = cls._organization_name(detail.get("tendering_agency"))
+        return "委托招标" if agency else ""
 
     @classmethod
     def _procurement_method(cls, detail: Mapping[str, Any], text: str) -> str:

@@ -1,4 +1,4 @@
-"""比比网专用导出器：四个栏目分别保存。"""
+"""比比网专用导出器：源栏目按最终标准公告类型保存。"""
 
 from itemadapter import ItemAdapter
 
@@ -13,6 +13,17 @@ class BitbidMultiFormatPipeline(SxjmMultiFormatPipeline):
         "candidate": ("比比网_中标候选人公示", "中标候选人公示"),
         "award": ("比比网_中标结果公示", "中标结果公示"),
     }
+    DYNAMIC_ROUTES = {
+        "__bitbid_prequalification__": (
+            "比比网_资格预审公告", "资格预审公告"
+        ),
+        "__bitbid_finalization_candidate__": (
+            "比比网_定标候选人公示", "定标候选人公示"
+        ),
+        "__bitbid_correction__": (
+            "比比网_更正及其他公告", "更正结果公示"
+        ),
+    }
 
     @classmethod
     def _route(cls, subtype: str) -> str:
@@ -20,6 +31,8 @@ class BitbidMultiFormatPipeline(SxjmMultiFormatPipeline):
 
     @classmethod
     def _route_config(cls, route: str) -> tuple[str, str]:
+        if route in cls.DYNAMIC_ROUTES:
+            return cls.DYNAMIC_ROUTES[route]
         subtype = route.removeprefix("__bitbid_").removesuffix("__")
         try:
             return cls.ROUTES[subtype]
@@ -31,29 +44,34 @@ class BitbidMultiFormatPipeline(SxjmMultiFormatPipeline):
         subtype = str(adapter.get("notice_subtype") or "")
         if subtype not in self.ROUTES:
             return item
-        route = self._route(subtype)
-        _, schema_type = self.ROUTES[subtype]
         actual_type = normalize_notice_type(adapter.get("notice_type"))
+        if actual_type == "资格预审公告" and subtype == "tender":
+            route = "__bitbid_prequalification__"
+            _, schema_type = self.DYNAMIC_ROUTES[route]
+        elif actual_type == "定标候选人公示" and subtype == "tender":
+            route = "__bitbid_finalization_candidate__"
+            _, schema_type = self.DYNAMIC_ROUTES[route]
+        elif actual_type == "更正结果公示" and subtype in {"tender", "award"}:
+            route = "__bitbid_correction__"
+            _, schema_type = self.DYNAMIC_ROUTES[route]
+        elif actual_type == "中标候选人公示" and subtype == "tender":
+            # 与源 candidate 栏目共享同一个路由键，避免两个文件句柄并发写同一路径。
+            route = self._route("candidate")
+            _, schema_type = self.ROUTES["candidate"]
+        elif actual_type == "中标结果公示" and subtype == "tender":
+            # 与源 award 栏目共享同一个路由键。
+            route = self._route("award")
+            _, schema_type = self.ROUTES["award"]
+        else:
+            route = self._route(subtype)
+            _, schema_type = self.ROUTES[subtype]
         if actual_type != schema_type:
             raise ValueError(
                 f"比比网栏目与Schema不一致：subtype={subtype} type={actual_type}"
             )
         record = self._build_record(adapter, schema_type)
-        if subtype == "award" and any(
-            word in str(adapter.get("title") or "")
-            for word in ("废标", "流标", "终止", "撤销")
-        ):
-            # 源站把废标结果混在“中标结果”栏目；字段形状仍复用结果公示，
-            # 生命周期编码按数据库约定保存为 TERMINATION。
-            record["公告类型"] = "TERMINATION"
         json_record = self._build_json_record(adapter, schema_type, record)
-        csv_writer = self._get_csv_writer(route)
-        self._get_json_path(route)
-        self._append_json_record(route, json_record)
-        csv_writer.writerow(
-            {key: self._serialize_csv(value) for key, value in record.items()}
-        )
-        self._csv_files[route].flush()
+        self._write_formats(route, record, json_record)
 
         field_meta = dict(adapter.get("field_meta") or {})
         dedup = field_meta.get("_dedup") or {}

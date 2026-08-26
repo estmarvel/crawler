@@ -44,13 +44,7 @@ class SxbidMultiFormatPipeline(SxjmMultiFormatPipeline):
             )
         record = self._build_record(adapter, schema_type)
         json_record = self._build_json_record(adapter, schema_type, record)
-        csv_writer = self._get_csv_writer(route)
-        self._get_json_path(route)
-        self._append_json_record(route, json_record)
-        csv_writer.writerow(
-            {key: self._serialize_csv(value) for key, value in record.items()}
-        )
-        self._csv_files[route].flush()
+        self._write_formats(route, record, json_record)
 
         field_meta = dict(adapter.get("field_meta") or {})
         dedup = field_meta.get("_dedup") or {}

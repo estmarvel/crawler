@@ -87,6 +87,27 @@ def test_existing_attachment_is_skipped_and_synced_to_json_csv(tmp_path):
     assert csv_attachment == current
 
 
+def test_json_only_attachment_flush_does_not_touch_existing_csv(tmp_path):
+    output_root = tmp_path / "output"
+    json_dir = output_root / "sxjm" / "json"
+    csv_dir = output_root / "sxjm" / "csv"
+    json_dir.mkdir(parents=True)
+    csv_dir.mkdir(parents=True)
+    json_path = json_dir / "依法项目_中标候选人公示.json"
+    csv_path = csv_dir / "依法项目_中标候选人公示.csv"
+    json_path.write_text("[]", encoding="utf-8")
+    csv_path.write_text("不应被修改\n", encoding="utf-8")
+
+    downloader = AttachmentDownloader(
+        DownloadConfig(output_root=output_root, sync_csv=False),
+        session=_NoNetworkSession(),
+    )
+    downloader._flush(json_path, [_record()])
+
+    assert len(json.loads(json_path.read_text(encoding="utf-8"))) == 1
+    assert csv_path.read_text(encoding="utf-8") == "不应被修改\n"
+
+
 def test_interrupted_part_file_is_resumed_with_range(tmp_path):
     content = b"0123456789-attachment-content"
 

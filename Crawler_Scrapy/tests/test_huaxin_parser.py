@@ -39,6 +39,7 @@ class HuaxinParserTest(unittest.TestCase):
             "bidName": "测试招标人",
             "companyName": "测试代理机构",
             "submitDeadline": "2026-08-01 09:00:00",
+            "openTime": "2026-08-01 09:00:00",
             "acquisitionStart": "2026-07-15 09:00:00",
             "acquisitionEnd": "2026-07-20 17:00:00",
             "projectOverview": "项目概况正文",
@@ -135,16 +136,16 @@ class HuaxinParserTest(unittest.TestCase):
         _, _, data, _ = HuaxinParser.parse("zbgg_zys", detail)
         self.assertEqual(data["项目名称"], "四家单位城燃物资集中采购(002标段)")
         self.assertEqual(data["项目性质"], "")
-        self.assertEqual(data["项目地点"], "中国-山西省|太原市")
+        self.assertEqual(data["项目地点"], "太原市")
         self.assertEqual(
             data["招标人/采购人名称"],
-            "甲公司、乙公司、丙公司、丁公司|上级产业集团有限公司",
+            "甲公司、乙公司、丙公司、丁公司",
         )
         self.assertEqual(data["招标人联系人"], "石建伟")
         self.assertEqual(data["招标人联系方式"], "0351-2981056")
         self.assertEqual(
             data["招标代理机构"],
-            "山西华新阳光科技咨询有限公司|接口代理机构",
+            "山西华新阳光科技咨询有限公司",
         )
         self.assertEqual(data["招标代理机构地址"], "太原市长治路345号东楼23层")
         self.assertEqual(data["招标代理机构联系人"], "李晓辉、张朝、闫潇腾")
@@ -182,14 +183,14 @@ class HuaxinParserTest(unittest.TestCase):
 
         self.assertEqual(
             data["招标人/采购人"],
-            "中建三局（吕梁）市政基础设施建设运营有限公司|接口招标人",
+            "中建三局（吕梁）市政基础设施建设运营有限公司",
         )
         self.assertEqual(data["招标人地址"], "吕梁市离石区")
         self.assertEqual(data["招标人联系人"], "王妥")
         self.assertEqual(data["招标人联系方式"], "18829039998")
         self.assertEqual(
             data["招标代理机构"],
-            "山西中吕项目管理有限公司|接口代理机构",
+            "山西中吕项目管理有限公司",
         )
         self.assertEqual(data["招标代理机构地址"], "吕梁市离石区滨河北路")
         self.assertEqual(data["招标代理机构联系人"], "李荣荣")
@@ -945,6 +946,215 @@ class HuaxinParserTest(unittest.TestCase):
             "注册监理工程师（房屋建筑工程专业）",
         )
         self.assertEqual(data["项目经理证书编号"], "14008291")
+
+    def test_tws_batch_description_is_not_organization_form(self):
+        _, _, data, _ = HuaxinParser.parse(
+            "zbgg_zys",
+            {
+                "annClassification": "1",
+                "annTitle": "组织形式测试招标公告",
+                "annNum": "重新招标",
+                "annContent": "<p>组织形式：委托招标</p>",
+            },
+        )
+        self.assertEqual(data["组织形式"], "委托招标")
+
+    def test_main_qualification_is_not_lost_when_consortium_api_field_exists(self):
+        _, _, data, _ = HuaxinParser.parse(
+            "zbgg_zys",
+            {
+                "annClassification": "1",
+                "annTitle": "资格边界测试招标公告",
+                "consortiumQualification": "联合体成员不得超过三家。",
+                "annContent": """
+                    <p>三、投标人资格要求</p>
+                    <p>3.1投标人须具备建筑工程施工总承包资质。</p>
+                    <p>四、招标文件获取</p><p>登录平台下载文件。</p>
+                """,
+            },
+        )
+        qualification = data["申请人资格要求/投标人资格要求"]
+        self.assertIn("建筑工程施工总承包资质", qualification)
+        self.assertIn("联合体成员不得超过三家", qualification)
+        self.assertNotIn("登录平台下载文件", qualification)
+
+    def test_contact_address_roles_and_literal_u3000_are_cleaned(self):
+        _, _, data, _ = HuaxinParser.parse(
+            "hxr",
+            {
+                "annClassification": "2",
+                "annTitle": "联系方式测试中标候选人公示",
+                "annContent": """
+                    <p>五、联系方式</p>
+                    <p>招标人：甲公司</p><p>地址：甲方地址</p>
+                    <p>联系人：张三</p><p>电话：111</p>
+                    <p>招标代理机构：乙公司u3000u3000</p>
+                    <p>联系地址：乙方地址</p><p>联系人：李四</p><p>电话：222</p>
+                """,
+            },
+        )
+        self.assertEqual(data["招标代理机构"], "乙公司")
+        self.assertEqual(data["招标代理机构地址"], "乙方地址")
+        self.assertNotEqual(data["招标人地址"], data["招标代理机构地址"])
+
+    def test_ranked_inline_price_without_colon_is_not_part_of_candidate_name(self):
+        _, _, data, _ = HuaxinParser.parse(
+            "hxr",
+            {
+                "annClassification": "2",
+                "annTitle": "候选人边界测试中标候选人公示",
+                "reviewSituation": """
+                    <p>一、评标情况</p><p>001第一标段</p>
+                    <p>第1名：山西元久建筑工程有限公司，投标报价9677129.73元：，工期：45天，项目负责人：付松</p>
+                    <p>二、提出异议</p>
+                """,
+            },
+        )
+        self.assertEqual(
+            data["中标候选人名称"],
+            ["001第一标段：山西元久建筑工程有限公司"],
+        )
+        self.assertEqual(data["中标候选人报价"], [Decimal("9677129.73")])
+
+    def test_named_candidate_inline_price_is_not_part_of_candidate_name(self):
+        _, _, data, _ = HuaxinParser.parse(
+            "hxr",
+            {
+                "annClassification": "2",
+                "annTitle": "监理候选人测试中标候选人公示",
+                "reviewSituation": """
+                    <p>一、评标情况</p><p>001第一标段</p>
+                    <p>第一中标候选人：河南省光大建设管理有限公司,投标报价：1924477元,监理服务期限：96天</p>
+                    <p>二、提出异议</p>
+                """,
+            },
+        )
+        self.assertEqual(
+            data["中标候选人名称"],
+            ["001第一标段：河南省光大建设管理有限公司"],
+        )
+        self.assertEqual(data["中标候选人报价"], [Decimal("1924477.00")])
+
+    def test_candidate_without_published_price_does_not_absorb_service_fields(self):
+        _, _, data, _ = HuaxinParser.parse(
+            "hxr",
+            {
+                "annClassification": "2",
+                "annTitle": "检测服务中标候选人公示",
+                "reviewSituation": """
+                    <p>一、评标情况</p><p>001第一标段</p>
+                    <p>第一中标候选人：吕梁天基建设工程质量检测有限公司,服务期限：合同签订后120天内,项目负责人：王晓红</p>
+                    <p>二、提出异议</p>
+                """,
+            },
+        )
+        self.assertEqual(
+            data["中标候选人名称"],
+            ["001第一标段：吕梁天基建设工程质量检测有限公司"],
+        )
+        self.assertEqual(data["中标候选人报价"], [None])
+
+    def test_candidate_textual_unit_prices_are_kept_but_not_part_of_name(self):
+        _, _, data, _ = HuaxinParser.parse(
+            "hxr",
+            {
+                "annClassification": "2",
+                "annTitle": "代理购电服务中标候选人公示",
+                "reviewSituation": """
+                    <p>一、评标情况</p>
+                    <p>第一名：山西智华能源投资有限公司，投标报价：电压等级10KV每度优惠0.0315元，电压等级35KV每度优惠0.0315元，服务期限：响应招标文件</p>
+                    <p>二、提出异议</p>
+                """,
+            },
+        )
+        self.assertEqual(
+            data["中标候选人名称"],
+            ["山西智华能源投资有限公司"],
+        )
+        self.assertEqual(
+            data["中标候选人报价"],
+            ["投标报价：电压等级10KV每度优惠0.0315元，电压等级35KV每度优惠0.0315元"],
+        )
+
+    def test_recommended_shortlisted_candidates_are_extracted(self):
+        _, _, data, _ = HuaxinParser.parse(
+            "hxr",
+            {
+                "annClassification": "2",
+                "annTitle": "钻井工程中标候选人公示",
+                "reviewSituation": """
+                    <p>一、评标情况</p><p>001第一标段</p>
+                    <p>推荐入围中标候选人1：甲工程有限公司,投标报价：20286500元,工期：30日历天</p>
+                    <p>推荐入围中标候选人2：乙工程有限公司</p>
+                    <p>二、提出异议的渠道和方式</p>
+                """,
+            },
+        )
+        self.assertEqual(
+            data["中标候选人名称"],
+            ["001第一标段：甲工程有限公司", "001第一标段：乙工程有限公司"],
+        )
+        self.assertEqual(
+            data["中标候选人报价"],
+            [Decimal("20286500.00"), None],
+        )
+
+    def test_plain_recommended_candidate_heading_uses_next_company(self):
+        _, _, data, _ = HuaxinParser.parse(
+            "hxr",
+            {
+                "annClassification": "2",
+                "annTitle": "软件项目中标候选人公示",
+                "annContent": """
+                    <p>经评标委员会评审，推荐的中标候选人，现公示如下：</p>
+                    <p>一、推荐中标候选人</p>
+                    <p>中电金信软件有限公司</p>
+                    <p>二、提出异议的渠道和方式</p>
+                """,
+            },
+        )
+        self.assertEqual(data["中标候选人名称"], ["中电金信软件有限公司"])
+        self.assertEqual(data["中标候选人报价"], [None])
+
+    def test_vertical_shortlist_table_without_price_keeps_all_candidates(self):
+        _, _, data, _ = HuaxinParser.parse(
+            "hxr",
+            {
+                "annClassification": "2",
+                "annTitle": "框架协议入围候选人公示",
+                "reviewSituation": """
+                    <p>一、评标情况</p><p>序号</p><p>入围候选人名称</p>
+                    <p>1</p><p>甲服务有限公司</p>
+                    <p>2</p><p>乙服务有限公司</p>
+                    <p>二、提出异议的渠道和方式</p>
+                """,
+            },
+        )
+        self.assertEqual(
+            data["中标候选人名称"],
+            ["甲服务有限公司", "乙服务有限公司"],
+        )
+        self.assertEqual(data["中标候选人报价"], [None, None])
+
+    def test_changed_qualification_uses_final_effective_text_and_stops_at_supervision(self):
+        _, _, data, _ = HuaxinParser.parse(
+            "zbgg_zys",
+            {
+                "annClassification": "1",
+                "annTitle": "资格要求变更公告",
+                "annContent": """
+                    <p>三、投标人资格要求</p><p>须具备TMMi3认证。</p>
+                    <p>现变更为：</p>
+                    <p>三、投标人资格要求</p><p>须具备TMMi3（含）以上认证。</p>
+                    <p>二、监督部门</p><p>监督单位：测试部门</p>
+                    <p>三、联系方式</p><p>招标人：测试单位</p>
+                """,
+            },
+        )
+        qualification = data["申请人资格要求/投标人资格要求"]
+        self.assertIn("TMMi3（含）以上", qualification)
+        self.assertNotIn("须具备TMMi3认证", qualification)
+        self.assertNotIn("监督单位", qualification)
 
 
 if __name__ == "__main__":

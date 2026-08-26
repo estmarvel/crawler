@@ -25,8 +25,8 @@ class NoticeItem(scrapy.Item):
     field_meta = scrapy.Field()
     raw_data = scrapy.Field()
     # 仅保存可公开、可复现请求的元数据；禁止写入 Cookie、Authorization 等凭据。
-    # JSON 导出器会将它与 raw_data/raw_html/raw_text 一起写入 `_trace`，供
-    # MongoDB raw_notices 溯源。现有业务字段和 CSV 表头不受影响。
+    # JSON 导出器只保留安全的响应元数据；raw_data/raw_html 由快照管道分别
+    # 落成独立文件，避免在结果 JSON 中再次内嵌大段原始内容。
     response_metadata = scrapy.Field()
 
     # raw_html 推荐传 response.body，以尽量保留服务器返回的原始字节。
@@ -42,6 +42,8 @@ class NoticeItem(scrapy.Item):
 
     snapshot_path = scrapy.Field()
     snapshot_sha256 = scrapy.Field()
+    payload_snapshot_path = scrapy.Field()
+    payload_snapshot_sha256 = scrapy.Field()
 
     attachments = scrapy.Field()
     file_urls = scrapy.Field()

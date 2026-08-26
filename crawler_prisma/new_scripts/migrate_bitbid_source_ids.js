@@ -35,7 +35,7 @@ function identityFromUrl(sourceUrl) {
 async function main() {
   const options = parseCommonArgs([...process.argv.slice(2), "--site=bitbid"]);
   const expected = await expectedIdentityIndex(options.outputRoot);
-  const stores = await openStores(options.apiRoot, { mongo: true });
+  const stores = await openStores(options.envFile, { mongo: true });
   try {
     const sources = await resolveDataSources(stores.prisma, ["bitbid"]);
     const dataSourceId = sources.get("bitbid").id;

@@ -10,6 +10,7 @@ const {
 } = require("./lib/runtime");
 const {
   businessRecordDigest,
+  isBusinessReady,
   loadBusinessDataset,
   mapBusinessRecord,
 } = require("./lib/business");
@@ -20,9 +21,9 @@ function printHelp() {
 
 Options:
   --commit                 Upsert project_notice and extraction links.
-  --site=<site>            all, sxjm, sxzwfw, bitbid, huaxin, or jiubang.
+  --site=<site>            all or any configured crawler site.
   --output-root=<path>     Crawler new_output root.
-  --api-root=<path>        Project recommendation API directory.
+  --env-file=<path>        crawler_prisma environment file (default: .env).
   --help                   Show this help.
 
 Run raw-notice, extraction, and project import stages first. Notice types are
@@ -194,6 +195,7 @@ async function main() {
   });
   console.log(`Mode: ${options.commit ? "COMMIT" : "DRY RUN (no database writes)"}`);
   console.log(`Validated notices: ${dataset.records.length}`);
+  console.log(`Non-PARSED notices kept only in raw/extraction storage: ${dataset.skippedNonParsedCount}`);
   console.log(`Resolved projects: ${dataset.projects.length}`);
   const typeCounts = new Map();
   for (const row of dataset.records) {
@@ -202,7 +204,7 @@ async function main() {
   for (const [type, count] of [...typeCounts].sort()) console.log(`  ${type}: ${count}`);
   if (!options.commit) return console.log("Dry run complete. Add --commit after earlier stages succeed.");
 
-  const stores = await openStores(options.apiRoot, { mongo: true });
+  const stores = await openStores(options.envFile, { mongo: true });
   try {
     const dataSources = await resolveDataSources(stores.prisma, options.sites);
     const projectIndex = await loadProjectIndex(stores.prisma, dataset.projects);
@@ -220,17 +222,21 @@ async function main() {
       batch = [];
     }
     for await (const record of iterateJsonNotices(options.outputRoot, options.sites)) {
+      if (!isBusinessReady(record)) continue;
       const row = mapBusinessRecord(record);
       const identity = `${row.site}\u0000${row.sourceNoticeId}`;
+      const digest = businessRecordDigest(row);
+      const previous = processedIdentities.get(identity);
       // loadBusinessDataset 已经验证相同身份只能是内容完全一致的重复项；
       // 正式写入只处理一次，避免同一批数据重复更新关联和 Mongo 文档。
-      if (processedIdentities.has(identity)) {
-        if (businessRecordDigest(processedIdentities.get(identity)) !== businessRecordDigest(row)) {
+      if (previous) {
+        if (previous.digest !== digest) {
           throw new Error(`${row.context}: conflicting duplicate 公告ID=${row.sourceNoticeId}`);
         }
         continue;
       }
-      processedIdentities.set(identity, row);
+      // row.content 可能是完整正文，去重表只保留摘要，批次写入后即可释放正文。
+      processedIdentities.set(identity, { digest, context: row.context });
       batch.push(row);
       if (batch.length >= 200) await flush();
     }

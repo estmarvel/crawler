@@ -141,6 +141,22 @@ class BaseNoticeSpider(scrapy.Spider):
         allowed = set(configured)
         return [field for field in missing_fields if field in allowed]
 
+    def is_ai_field_suspicious(
+        self,
+        notice_type: str,
+        field_name: str,
+        value: Any,
+        data: Mapping[str, Any],
+        text: str,
+    ) -> bool:
+        """站点级 AI 异常升级钩子，默认不额外升级任何字段。
+
+        公共 Pipeline 已覆盖缺值有标签、HTML 残留、角色占位符和列表错位；
+        具体网站只需在已验证的模板异常无法由通用规则表达时重写本方法。
+        """
+
+        return False
+
     def check_notice_candidate(
         self,
         *,
@@ -327,6 +343,8 @@ class BaseNoticeSpider(scrapy.Spider):
         item["is_verified"] = bool(is_verified)
         item["snapshot_path"] = ""
         item["snapshot_sha256"] = ""
+        item["payload_snapshot_path"] = ""
+        item["payload_snapshot_sha256"] = ""
         item["attachments"] = attachment_list
         item["file_urls"] = file_urls
         return item

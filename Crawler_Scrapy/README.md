@@ -1,6 +1,6 @@
 # Crawler_Scrapy
 
-公共 Scrapy 框架当前包含统一公告 Schema、HTML 快照和 CSV/JSON 输出，已适配华新、
+公共 Scrapy 框架当前包含统一公告 Schema、HTML 快照和 JSON 输出，已适配华新、
 玖邦、千极数采、山西交控，以及山西省公共资源交易平台工程建设公告和政府采购公告。
 
 ## 运行环境
@@ -46,6 +46,27 @@ cd /home/intsig/Crawler_Scrapy
 
 每个网站只保留一个入口；同一命令默认先采公告/快照，再独立下载附件：
 
+已接入混合 AI 的网站提供一个正式全量调度入口。当前生产队列按任务要求运行
+`huaxin、jiubang、trade365、sxbid、bitbid、qianji、sxxindian`，暂不调度
+`sxjm、sxzwfw`。入口固定使用
+`Qwen/Qwen3-8B`、双 Key/双队列和 `output/<网站代码>/` 目录；默认命令只展示计划，
+不会误启动。正式执行时先完成全部公告和快照，再下载附件，批次间保存断点后立即续跑，
+不做周期冷却；源站 403/429、网络异常和低磁盘空间仍会触发保护。
+
+```bash
+./run_ai_full_crawl.sh plan
+./run_ai_full_crawl.sh start
+./run_ai_full_crawl.sh status
+./run_ai_full_crawl.sh attach
+./run_ai_full_crawl.sh stop
+```
+
+两个 Key 分别从 `.env` 的 `SILICONFLOW_API_KEY` 和
+`SILICONFLOW_API_KEY2` 读取。按既有真实样本约 1,200 Token/次估算，每 Key 的
+1.8 秒最小请求间隔约为 40,000 TPM，即 50,000 TPM 额度的 80%；真正约束吞吐的是
+TPM，而不是 1,000 RPM。若两把 Key 实际属于同一个共享额度账号，应将
+`FULL_AI_MIN_INTERVAL` 调大到至少 `3.6` 秒。
+
 完整参数、运行场景、续跑和问题排查见
 [`crawler_scrapy/docs/五站统一运行说明.md`](crawler_scrapy/docs/五站统一运行说明.md)；
 各站接口、栏目和字段提取细节见
@@ -66,6 +87,7 @@ cd /home/intsig/Crawler_Scrapy
 ./run_sxjkzcpt.sh --days 180
 ./run_trade365.sh --days 180
 ./run_sxbid.sh --days 180
+./run_gxebidding.sh --days 180
 ```
 
 补采源站现存的全部历史公告时使用 `--all`，例如：
@@ -94,17 +116,17 @@ cd /home/intsig/Crawler_Scrapy
 
 脚本启用跨运行去重和追加输出，同一公告相同内容不会重复保存；同一公告正文发生变化时
 会追加新版本，保留旧版本和各自的“爬虫时间”。同一时间窗口中断后再次执行相同命令，
-会从 `new_output/<网站代码>/state/jobs/` 中恢复；不同时间窗口使用相互隔离的恢复目录。
+会从 `output/<网站代码>/state/jobs/` 中恢复；不同时间窗口使用相互隔离的恢复目录。
 
 输出位置：
 
-- 华新 JSON/CSV/附件：`new_output/huaxin/`
-- 玖邦 JSON/CSV/附件：`new_output/jiubang/`
-- 千极数采 JSON/CSV/快照/附件：`new_output/qianji/`
-- 山西交控 JSON/CSV/快照/附件：`new_output/sxjkzcpt/`
-- 中招联合山西 JSON/CSV/快照/附件：`new_output/trade365/`
-- 山西招投标网 JSON/CSV/快照/附件：`new_output/sxbid/`
-- 单站实时日志：`new_output/<网站代码>/logs/`
+- 华新 JSON/附件：`output/huaxin/`
+- 玖邦 JSON/附件：`output/jiubang/`
+- 千极数采 JSON/快照/附件：`output/qianji/`
+- 山西交控 JSON/快照/附件：`output/sxjkzcpt/`
+- 中招联合山西 JSON/快照/附件：`output/trade365/`
+- 山西招投标网 JSON/快照/附件：`output/sxbid/`
+- 单站实时日志：`output/<网站代码>/logs/`
 
 固定代理地址允许由环境变量覆盖；认证信息只从 `HUAXIN_PROXY_USERNAME`、
 `HUAXIN_PROXY_PASSWORD` 读取，不写入源码或命令行。代理更换后应更新部署环境。
@@ -116,11 +138,11 @@ PDF-only 详情则作为详情原件下载归档。
 即使 `fileName` 为空也会保留 `fileId`，再通过前端实际使用的
 `/bidding/file/query/{fileId}` 补充名称和预览 URL。华新 Spider 会下载二进制
 原文件，但不做 OCR/AI 文档解析；文件保存在
-`new_output/huaxin/attachments/<公告类型>/<公告ID>/`。导出结果的附件字段保留
+`output/huaxin/attachments/<公告类型>/<公告ID>/`。导出结果的附件字段保留
 `source_file_id`、`file_name`、`file_url`、`storage_path`、`file_hash`、
 `file_size_bytes`、`file_type`、`parse_status`，其中 `storage_path` 相对于
 `FILES_STORE`。同一源站文件 ID 使用稳定路径，已下载文件直接复用，不覆盖历史
-CSV/JSON。华新已关闭HTML快照保存，但附件下载保持开启。
+JSON。9 个 AI 网站不再创建或更新 CSV；华新附件下载保持开启。
 
 天启配置仍完整保留为手动备用模式。启用时需注入 `TIANQI_SECRET`、`TIANQI_SIGN`，
 并增加 `-s CRAWLER_OUTBOUND_MODE=tianqi`。代理默认每次提取 10 个、有效期 3 分钟、
@@ -131,7 +153,7 @@ HTTPS 类型；生产最多调用代理 API 5 次，测试可限制为 1 次。�
 
 玖邦与华新使用同一套 TWS 招投标前端。框架中的 `jiubang` Spider 复用华新已验证
 的公告分类、字段提取、`annNature`、去重追加和附件处理规则，仅使用玖邦自己的
-API、详情页域名和 `new_output/jiubang/` 输出空间。当前只采集招投标模块，不会混入
+API、详情页域名和 `output/jiubang/` 输出空间。当前只采集招投标模块，不会混入
 独立采购、竞价或零散采购数据。前端分析记录见
 `crawler_scrapy/docs/jiubang/analysis.md`。
 
@@ -141,8 +163,8 @@ API、详情页域名和 `new_output/jiubang/` 输出空间。当前只采集招
 python -m unittest tests.test_jiubang_spider -v
 ```
 
-玖邦使用 `./run_jiubang.sh` 运行。结果追加到 `new_output/jiubang/json/` 和
-`new_output/jiubang/csv/`，附件保存在 `new_output/jiubang/attachments/`，不会覆盖历史版本。
+玖邦使用 `./run_jiubang.sh` 运行。结果追加到 `output/jiubang/json/`，附件保存在
+`output/jiubang/attachments/`，不会覆盖历史版本，也不会创建 CSV。
 
 ## AI 补充 HTML 缺失字段
 
@@ -186,6 +208,12 @@ result = service.extract(
 位于 `annContent/annContent2` 的金额、范围、资格要求、候选人、工期、项目经理和
 联系方式等字段才会提交。`NOTICE_AI_ENABLED` 仍默认关闭，避免批量历史采集意外产生
 模型费用。
+
+Qianji、SXJM、Bitbid、Trade365、SXZWFW 已使用证据裁决型 C 方案，并支持在不改变
+原 GLM-5.2 配置的情况下切换到硅基流动 `Qwen/Qwen3-8B`。Qwen 使用独立的
+`SILICONFLOW_API_KEY`、非思考模式和字段级 JSON Schema；完整配置、全量运行命令及
+断点注意事项见
+[`crawler_scrapy/docs/AI双模型切换与全量采集说明.md`](crawler_scrapy/docs/AI双模型切换与全量采集说明.md)。
 
 ## 跨运行去重与历史版本
 

@@ -8,7 +8,7 @@
 - 列表接口 `/api/portal/v1/announcement/index` 提供公告 ID、标题、公告类型、频道分类和发布时间，用于分页与详情链接构造。
 - 详情页 `/home/detail?id={id}` 使用详情接口 `/api/portal/v1/announcement/details/{id}`；接口响应为 AES-128-CBC 加密 JSON。
 - 详情 JSON 的独立字段优先用于稳定元数据；`content` HTML 用于正文段落、联系方式和结果表格；`document` 用于附件。
-- `_trace.payload.list/detail` 保存解密后的原始列表和详情对象；`transport` 保存列表请求参数、分页、列表/详情响应元数据和接口业务状态。加密密文本身不重复保存。
+- 独立 payload 快照的 `list/detail` 保存解密后的原始列表和详情对象；`_trace.responseMetadata` 保存列表请求参数、分页、列表/详情响应元数据和接口业务状态。加密密文本身不重复保存。
 
 ## 四个频道与公告类型
 

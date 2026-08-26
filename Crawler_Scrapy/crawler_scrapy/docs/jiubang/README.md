@@ -35,9 +35,18 @@ cd /home/intsig/Crawler_Scrapy
 # 四类各最多5条
 ./run_jiubang.sh --phase notices --max-records 5 --max-pages 2 --page-size 5
 
+# 开启C2混合AI（GLM-5.2）
+./run_jiubang.sh --phase notices --ai-extract --ai-provider zhipu --ai-model glm-5.2
+
+# 切换为Qwen3-8B；0表示不限制总调用次数，仍遵守调用间隔和限流退避
+./run_jiubang.sh --phase notices --ai-extract --ai-provider siliconflow --ai-model Qwen/Qwen3-8B --ai-max-calls 0
+
 # 只下载附件
 ./run_jiubang.sh --phase attachments
 ```
 
 正式入口默认直连、并发2、请求间隔3到5秒、每400个响应冷却180到300秒；第一次
-403/429即停止。输出位于 `new_output/jiubang/`。
+403/429即停止。默认输出位于 `output/jiubang/`。
+
+当前已接入与千极链相同的证据裁决型混合AI，但只在重要字段缺失且有明确标签、
+长章节越界、HTML/转义残留或名单报价错位时调用；快照、原始响应和附件字段不交给AI。

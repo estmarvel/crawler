@@ -7,16 +7,22 @@
 - `bitbid`：比比网
 - `huaxin`：华新阳光采购平台
 - `jiubang`：玖邦招标采购电子交易平台
+- `sxjkzcpt`：山西交控招投标采购服务平台
+- `trade365`：中招联合（山西）招标采购网
+- `sxxindian`：山西新点招投标交易平台
+- `sxbid`：山西省招标投标公共服务平台
+- `qianji`：千极数采电子交易平台
 
 导入器不修改数据库结构、不执行迁移，目标结构以
-`recommendation/project-recommendation-system/api/prisma/schema.prisma` 为准。
+`crawler_prisma/prisma/schema.prisma` 为准。运行时使用本目录的 `.env`、
+`@prisma/client`、`mongodb` 和 `minio` 依赖，不修改也不依赖 recommendation 源码。
 
 ## 存储对应关系
 
 | 数据 | 保存位置 |
 |---|---|
 | 公告来源、标题、时间、指纹、版本索引 | MySQL `raw_notice` |
-| 完整源 JSON、正文、原始 HTML、请求溯源 | MongoDB `raw_notices` |
+| 源站 payload、正文、原始 HTML、请求溯源 | MongoDB `raw_notices` |
 | 附件文件 | MinIO `notice-attachments` |
 | 附件名称、URL、哈希、对象键和状态 | MySQL `raw_notice_attachment` |
 | 抽取模型、版本、核验状态 | MySQL `notice_extraction` |
@@ -24,9 +30,40 @@
 | 项目主数据 | MySQL `project` |
 | 项目公告及结构化字段 | MySQL `project_notice` |
 | 项目公告附件引用 | MySQL `project_notice_attachment` |
+| 公告资格要求原子条件 | MySQL `project_requirement` |
 
-HTML 快照不会重复写入 MySQL。`_trace.rawHtml`、`_trace.rawText`、原始响应、
-`HTML快照路径` 和 SHA256 会进入 MongoDB 溯源文档，能够从业务公告反查原始公告。
+## 历史资格要求提取
+
+脚本读取 `project_notice.structured_data["申请人资格要求/投标人资格要求"]`，默认只生成报告：
+
+```bash
+npm run import:project-requirements -- --limit=20
+```
+
+审核报告后再定向写入：
+
+```bash
+npm run import:project-requirements -- \
+  --commit \
+  --notice-ids=29516,29517,29518,29520 \
+  --batch-id=qualification-reviewed-001
+```
+
+不要在未复核 `OTHER` 和低置信度结果前使用 `--allow-all` 全量写入。
+
+启用 Qwen 复核时只需在 `.env` 配置 `QUALIFICATION_AI_API_KEY`。默认服务地址为
+`https://api.siliconflow.cn/v1`，默认模型为 `Qwen/Qwen3-8B`；仅在切换服务商或模型时
+才需要配置 `QUALIFICATION_AI_BASE_URL` 或 `QUALIFICATION_AI_MODEL`。
+
+Qwen 默认关闭思考模式并使用 60 秒超时，必要时可用 `QUALIFICATION_AI_TIMEOUT_MS`
+覆盖。模型结果只有在原文证据、V1 字段、枚举和最低 0.6 置信度全部通过时才会
+替换 `OTHER`，否则继续保留原规则结果。
+
+HTML 快照不会重复写入结果 JSON 或 MySQL。JSON 业务字段保持各公告类型的完整固定
+Schema（空值也保留），顶层保存正文、HTML快照路径和
+SHA256；`_trace.payloadSnapshot` 保存源站 payload 快照引用。导入器校验快照哈希后，
+把 payload、HTML和正文写入 MongoDB，能够从业务公告反查原始公告。旧版 `_trace`
+1.0 内嵌结构仍可导入。
 
 ## 项目与公告关联
 
@@ -52,19 +89,21 @@ JSON 顶层的 `TENDER/CANDIDATE/AWARD` 是传输编码。写入
 
 ```text
 爬虫输出：/home/intsig/Crawler_Scrapy/new_output
-API目录： /home/intsig/recommendation/project-recommendation-system/api
-环境文件：/home/intsig/recommendation/project-recommendation-system/.env.production
+环境文件：/home/intsig/crawler_prisma/.env
 ```
 
-均可用 `--output-root`、`--api-root` 或 `PROJECT_RECOMMENDATION_ENV` 覆盖。
+可用 `--output-root`、`--env-file` 或 `CRAWLER_PRISMA_ENV` 调整。为防止误连旧库，
+本地 `.env` 中已核验的 MySQL 配置优先；`--env-file` 用于补充缺失的 MongoDB/MinIO
+变量，进程显式环境变量优先级最高。配置内容不会复制到代码或提交到 Git。
 
 ## 准备 Prisma Client
 
 该操作只生成客户端，不迁移数据库：
 
 ```bash
-cd /home/intsig/recommendation/project-recommendation-system/api
-npm run prisma:generate
+cd /home/intsig/crawler_prisma
+npm install
+npx prisma generate
 ```
 
 ## Dry-run

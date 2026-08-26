@@ -10,9 +10,9 @@ function printHelp() {
 
 Options:
   --commit                 Upsert project attachment metadata.
-  --site=<site>            all, sxjm, sxzwfw, bitbid, huaxin, or jiubang.
+  --site=<site>            all or any configured crawler site.
   --output-root=<path>     Crawler new_output root (used to select available sites).
-  --api-root=<path>        Project recommendation API directory.
+  --env-file=<path>        crawler_prisma environment file (default: .env).
 
 Copies attachment metadata and existing MinIO object references from
 raw_notice_attachment to project_notice_attachment. No file is uploaded again.
@@ -26,7 +26,7 @@ function identity(row) {
 async function main() {
   const options = parseCommonArgs(process.argv.slice(2));
   if (options.help) return printHelp();
-  const stores = await openStores(options.apiRoot);
+  const stores = await openStores(options.envFile);
   try {
     const dataSources = await resolveDataSources(stores.prisma, options.sites);
     const dataSourceIds = [...dataSources.values()].map((source) => source.id);

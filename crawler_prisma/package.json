@@ -8,6 +8,8 @@
     "import:projects": "node new_scripts/import_projects.js",
     "import:project-notices": "node new_scripts/import_project_notices.js",
     "import:project-notice-attachments": "node new_scripts/import_project_notice_attachments.js",
+    "import:project-requirements": "node new_scripts/import_project_requirements.js",
+    "audit:project-requirements": "node new_scripts/audit_project_requirements.js",
     "import:notice-extractions": "node new_scripts/import_notice_extractions.js",
     "import:raw-notice-attachments": "node new_scripts/import_raw_notice_attachments.js",
     "import:raw-notices": "node new_scripts/import_raw_notices.js",
@@ -20,6 +22,8 @@
     "prisma": "^6.16.0"
   },
   "dependencies": {
-    "@prisma/client": "^6.16.0"
+    "@prisma/client": "^6.16.0",
+    "minio": "^8.0.5",
+    "mongodb": "^6.17.0"
   }
 }

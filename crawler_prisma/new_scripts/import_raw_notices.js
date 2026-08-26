@@ -7,6 +7,7 @@ const {
   assertMaxLength,
   iterateJsonNotices,
   jsonNoticeFiles,
+  loadTraceSources,
   nullableString,
   openStores,
   parseCommonArgs,
@@ -23,10 +24,10 @@ function printHelp() {
 
 Options:
   --commit                 Write MongoDB documents and MySQL index rows.
-  --site=<site>            all, sxjm, sxzwfw, bitbid, huaxin, or jiubang.
+  --site=<site>            all or any configured crawler site.
   --crawl-task-id=<id>     Optional existing crawl_task id; requires one site.
   --output-root=<path>     Crawler output root.
-  --api-root=<path>        Project recommendation API directory.
+  --env-file=<path>        crawler_prisma environment file (default: .env).
   --help                   Show this help.
 
 Without --commit this command only validates JSON and does not connect to storage.
@@ -42,9 +43,10 @@ function mapRecord(record) {
   const fingerprint = nullableString(source["内容指纹"]);
   const noticeType = requiredString(source["公告类型"], "公告类型", context).toUpperCase();
   const trace = traceEnvelope(source, context);
-  const rawText = nullableString(trace?.rawText) || (noticeType === "PLAN"
-    ? null
-    : nullableString(source["公告正文"]) || nullableString(source["公告内容"]));
+  const traceSources = loadTraceSources(record, trace);
+  const rawText = nullableString(source["公告正文"])
+    || nullableString(source["公告内容"])
+    || nullableString(trace?.rawText);
 
   assertMaxLength(sourceUrl, 1024, "详情页链接/source_url", context);
   assertMaxLength(sourceNoticeId, 256, "公告ID/source_notice_id", context);
@@ -60,6 +62,8 @@ function mapRecord(record) {
     parseStatus,
     fingerprint,
     rawText,
+    rawHtml: traceSources.rawHtml,
+    payload: traceSources.payload,
     trace,
     publishDate: parseCrawlerDate(source["发布时间"] ?? source["发布日期"], "发布时间/发布日期", context),
     crawlTime: parseCrawlerDate(source["爬虫时间"], "爬虫时间", context, true),
@@ -84,26 +88,6 @@ function recordDigest(row) {
 
 function validObjectId(ObjectId, value) {
   return typeof value === "string" && ObjectId.isValid(value) && new ObjectId(value).toHexString() === value;
-}
-
-function exportMetadata(row) {
-  const source = row.source;
-  return {
-    platformName: nullableString(source["平台名称"]),
-    platformCode: nullableString(source["平台代码"]),
-    sourceNoticeId: nullableString(source["公告ID"]),
-    noticeType: nullableString(source["公告类型"]),
-    noticeSubtype: nullableString(source["公告子类型"]),
-    title: nullableString(source["公告标题"]),
-    publishTime: source["发布时间"] ?? null,
-    detailUrl: nullableString(source["详情页链接"]),
-    parseStatus: nullableString(source["解析状态"]),
-    isVerified: source["是否已核验"] ?? false,
-    missingFields: Array.isArray(source["缺失字段"]) ? source["缺失字段"] : [],
-    snapshotPath: nullableString(source["HTML快照路径"]),
-    snapshotSha256: nullableString(source["HTML快照SHA256"]),
-    attachments: Array.isArray(source["附件"]) ? source["附件"] : [],
-  };
 }
 
 async function writeOccurrence(prisma, crawlTaskId, rawNotice, previousFingerprint, currentFingerprint) {
@@ -155,8 +139,11 @@ async function importOne(stores, row, dataSourceId, crawlTaskId) {
     sourceUrl: row.sourceUrl,
     title: row.title,
     contentVersion,
-    payload: row.trace?.payload || row.source,
-    rawHtml: nullableString(row.trace?.rawHtml),
+    payload: row.payload || {
+      sourceNoticeId: row.sourceNoticeId,
+      sourceUrl: row.sourceUrl,
+    },
+    rawHtml: row.rawHtml,
     rawText: row.rawText,
     responseMetadata: {
       ...(row.trace?.responseMetadata || {}),
@@ -167,14 +154,12 @@ async function importOne(stores, row, dataSourceId, crawlTaskId) {
       trace: row.trace ? {
         schemaVersion: row.trace.schemaVersion,
         noticeSchemaVersion: row.trace.noticeSchemaVersion || null,
-        extractionModel: row.trace.extractionModel || null,
+        crawlerVersion: row.trace.crawlerVersion || null,
         extractionVersion: row.trace.extractionVersion || null,
-        fieldMeta: row.trace.fieldMeta || null,
-        exportMetadata: row.trace.exportMetadata || exportMetadata(row),
+        payloadSnapshot: row.trace.payloadSnapshot || null,
         integrity: row.trace.integrity || null,
       } : {
         schemaVersion: null,
-        exportMetadata: exportMetadata(row),
       },
     },
     fingerprint: row.fingerprint,
@@ -238,7 +223,7 @@ async function main() {
   console.log(`Output root: ${options.outputRoot}`);
   console.log(`Validated JSON files: ${jsonNoticeFiles(options.outputRoot, options.sites).length}`);
 
-  const stores = options.commit ? await openStores(options.apiRoot, { mongo: true }) : null;
+  const stores = options.commit ? await openStores(options.envFile, { mongo: true }) : null;
   try {
     const dataSources = stores ? await resolveDataSources(stores.prisma, options.sites) : null;
     let crawlTaskId = null;
@@ -262,17 +247,21 @@ async function main() {
     for await (const record of iterateJsonNotices(options.outputRoot, options.sites)) {
       const row = mapRecord(record);
       const key = `${row.site}\u0000${row.sourceNoticeId}`;
-      if (identities.has(key)) {
+      const digest = recordDigest(row);
+      const previous = identities.get(key);
+      if (previous) {
         duplicateCount += 1;
-        if (recordDigest(identities.get(key)) !== recordDigest(row)) {
+        if (previous.digest !== digest) {
           throw new Error(
             `${row.context}: conflicting duplicate 公告ID=${row.sourceNoticeId}; `
-            + `first seen at ${identities.get(key).context}`,
+            + `first seen at ${previous.context}`,
           );
         }
         continue;
       } else {
-        identities.set(key, row);
+        // 旧版 trace 可能内嵌完整 HTML/载荷。这里只保存摘要与来源位置，
+        // 避免全站导入时 identities Map 长期持有数 GB 的公告正文和快照。
+        identities.set(key, { digest, context: row.context });
         siteCounts.set(row.site, siteCounts.get(row.site) + 1);
       }
       if (stores) {
@@ -301,4 +290,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { exportMetadata, mapRecord, recordDigest };
+module.exports = { mapRecord, recordDigest };

@@ -7,10 +7,7 @@ const { createHash } = require("node:crypto");
 const NEW_SCRIPTS_ROOT = path.resolve(__dirname, "..");
 const CRAWLER_PRISMA_ROOT = path.resolve(NEW_SCRIPTS_ROOT, "..");
 const DEFAULT_OUTPUT_ROOT = path.resolve(CRAWLER_PRISMA_ROOT, "../Crawler_Scrapy/new_output");
-const DEFAULT_API_ROOT = path.resolve(
-  CRAWLER_PRISMA_ROOT,
-  "../recommendation/project-recommendation-system/api",
-);
+const DEFAULT_ENV_FILE = path.resolve(CRAWLER_PRISMA_ROOT, ".env");
 
 const SITE_CONFIG = Object.freeze({
   huaxin: Object.freeze({ preferredDataSourceId: 6, shortCodes: ["huaxin", "ygcgpt"] }),
@@ -18,6 +15,14 @@ const SITE_CONFIG = Object.freeze({
   sxjm: Object.freeze({ preferredDataSourceId: 7, shortCodes: ["sxjm", "sxccdzzcpt"] }),
   sxzwfw: Object.freeze({ preferredDataSourceId: 21, shortCodes: ["sxzwfw"] }),
   bitbid: Object.freeze({ preferredDataSourceId: 12, shortCodes: ["bitbid"] }),
+  sxjkzcpt: Object.freeze({ preferredDataSourceId: 9, shortCodes: ["sxjkzcpt"] }),
+  trade365: Object.freeze({ preferredDataSourceId: 16, shortCodes: ["trade365", "shanxi_365trade"] }),
+  sxxindian: Object.freeze({ preferredDataSourceId: 18, shortCodes: ["sxxindian"] }),
+  sxbid: Object.freeze({ preferredDataSourceId: 22, shortCodes: ["sxbid"] }),
+  qianji: Object.freeze({ preferredDataSourceId: 24, shortCodes: ["qianji", "qianjilink"] }),
+  runshihua: Object.freeze({ preferredDataSourceId: null, shortCodes: ["runshihua"] }),
+  gxebidding: Object.freeze({ preferredDataSourceId: 26, shortCodes: ["gxebidding", "guoxin_shanxi"] }),
+  sxzfcg: Object.freeze({ preferredDataSourceId: 27, shortCodes: ["sxzfcg", "ccgp_shanxi"] }),
 });
 
 function nullableString(value) {
@@ -92,10 +97,10 @@ function parseCrawlerDate(value, field, context, required = false) {
     return null;
   }
   const match = text.match(
-    /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,6}))?$/,
+    /^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,6}))?)?$/,
   );
   if (!match) throw new Error(`${context}: invalid ${field}: ${text}`);
-  const [, year, month, day, hour, minute, second, fraction = ""] = match;
+  const [, year, month, day, hour = "00", minute = "00", second = "00", fraction = ""] = match;
   const date = new Date(
     `${year}-${month}-${day}T${hour}:${minute}:${second}.${fraction.padEnd(3, "0").slice(0, 3)}+08:00`,
   );
@@ -113,15 +118,26 @@ function traceEnvelope(source, context = "record") {
   if (typeof value !== "object" || Array.isArray(value)) {
     throw new Error(`${context}: _trace must be an object`);
   }
-  if (nullableString(value.schemaVersion) !== "1.0") {
+  const schemaVersion = nullableString(value.schemaVersion);
+  if (!["1.0", "2.0"].includes(schemaVersion)) {
     throw new Error(`${context}: unsupported _trace.schemaVersion ${value.schemaVersion}`);
   }
-  if (!value.payload || typeof value.payload !== "object" || Array.isArray(value.payload)) {
+  if (
+    schemaVersion === "1.0" &&
+    (!value.payload || typeof value.payload !== "object" || Array.isArray(value.payload))
+  ) {
     throw new Error(`${context}: _trace.payload must be an object`);
   }
-  for (const field of ["rawHtml", "rawText", "crawlerVersion"]) {
+  for (const field of ["rawHtml", "rawText", "crawlerVersion", "extractionVersion"]) {
     if (value[field] !== null && value[field] !== undefined && typeof value[field] !== "string") {
       throw new Error(`${context}: _trace.${field} must be a string or null`);
+    }
+  }
+  if (schemaVersion === "2.0") {
+    for (const field of ["payload", "rawHtml", "rawText", "exportMetadata"]) {
+      if (value[field] !== null && value[field] !== undefined) {
+        throw new Error(`${context}: _trace.${field} is not allowed in schema 2.0`);
+      }
     }
   }
   if (
@@ -142,6 +158,21 @@ function traceEnvelope(source, context = "record") {
   ) {
     throw new Error(`${context}: _trace.exportMetadata must be an object`);
   }
+  const payloadSnapshot = value.payloadSnapshot;
+  if (payloadSnapshot !== null && payloadSnapshot !== undefined) {
+    if (typeof payloadSnapshot !== "object" || Array.isArray(payloadSnapshot)) {
+      throw new Error(`${context}: _trace.payloadSnapshot must be an object`);
+    }
+    requiredString(payloadSnapshot.path, "_trace.payloadSnapshot.path", context);
+    const sha256 = requiredString(
+      payloadSnapshot.sha256,
+      "_trace.payloadSnapshot.sha256",
+      context,
+    );
+    if (!/^[a-f0-9]{64}$/iu.test(sha256)) {
+      throw new Error(`${context}: _trace.payloadSnapshot.sha256 must be SHA256`);
+    }
+  }
   const fieldConfidences = value.fieldMeta?.fieldConfidences;
   if (
     fieldConfidences !== null && fieldConfidences !== undefined &&
@@ -154,6 +185,68 @@ function traceEnvelope(source, context = "record") {
     throw new Error(`${context}: _trace.fieldMeta.evidence must be an array`);
   }
   return value;
+}
+
+function snapshotBytes(record, relativePath, expectedSha256, label) {
+  const snapshotPath = nullableString(relativePath);
+  if (!snapshotPath) return null;
+  const outputRoot = path.resolve(record.outputRoot);
+  const absolutePath = path.resolve(outputRoot, snapshotPath);
+  const outputPrefix = `${outputRoot}${path.sep}`;
+  if (absolutePath !== outputRoot && !absolutePath.startsWith(outputPrefix)) {
+    throw new Error(`${record.context}: ${label} escapes output root: ${snapshotPath}`);
+  }
+  if (!fs.existsSync(absolutePath) || !fs.statSync(absolutePath).isFile()) {
+    throw new Error(`${record.context}: ${label} does not exist: ${absolutePath}`);
+  }
+  const bytes = fs.readFileSync(absolutePath);
+  const actualSha256 = createHash("sha256").update(bytes).digest("hex");
+  const expected = nullableString(expectedSha256)?.toLowerCase() || null;
+  if (expected && actualSha256 !== expected) {
+    throw new Error(
+      `${record.context}: ${label} SHA256 mismatch: expected=${expected} actual=${actualSha256}`,
+    );
+  }
+  return bytes;
+}
+
+function decodeSnapshotText(bytes) {
+  if (!bytes) return null;
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    return new TextDecoder("gb18030").decode(bytes);
+  }
+}
+
+function loadTraceSources(record, trace) {
+  let payload = null;
+  let rawHtml = null;
+  if (trace?.schemaVersion === "1.0") {
+    payload = trace.payload || null;
+    rawHtml = nullableString(trace.rawHtml);
+  } else if (trace?.payloadSnapshot) {
+    const bytes = snapshotBytes(
+      record,
+      trace.payloadSnapshot.path,
+      trace.payloadSnapshot.sha256,
+      "payload snapshot",
+    );
+    try {
+      payload = JSON.parse(bytes.toString("utf8"));
+    } catch (error) {
+      throw new Error(`${record.context}: cannot parse payload snapshot: ${error.message}`);
+    }
+  }
+  if (!rawHtml) {
+    rawHtml = decodeSnapshotText(snapshotBytes(
+      record,
+      record.source["HTML快照路径"],
+      record.source["HTML快照SHA256"],
+      "HTML snapshot",
+    ));
+  }
+  return { payload, rawHtml };
 }
 
 function readJsonNotices(outputRoot, sites) {
@@ -189,7 +282,7 @@ function readJsonNotices(outputRoot, sites) {
         if (platformCode !== site) {
           throw new Error(`${context}: 平台代码 is ${platformCode}, expected ${site}`);
         }
-        records.push({ site, fileName, index, context, source });
+        records.push({ site, fileName, filePath, outputRoot: path.resolve(outputRoot), index, context, source });
       });
     }
   }
@@ -287,7 +380,7 @@ async function* iterateJsonNotices(outputRoot, sites) {
       if (platformCode !== file.site) {
         throw new Error(`${context}: 平台代码 is ${platformCode}, expected ${file.site}`);
       }
-      yield { ...file, index, context, source };
+      yield { ...file, outputRoot: path.resolve(outputRoot), index, context, source };
       index += 1;
     }
   }
@@ -298,7 +391,7 @@ function parseCommonArgs(argv, extra = {}) {
     commit: false,
     site: "all",
     outputRoot: DEFAULT_OUTPUT_ROOT,
-    apiRoot: process.env.PROJECT_RECOMMENDATION_API_ROOT || DEFAULT_API_ROOT,
+    envFile: process.env.CRAWLER_PRISMA_ENV || DEFAULT_ENV_FILE,
     ...extra,
   };
   for (const arg of argv) {
@@ -306,7 +399,12 @@ function parseCommonArgs(argv, extra = {}) {
     else if (arg === "--help" || arg === "-h") options.help = true;
     else if (arg.startsWith("--site=")) options.site = arg.slice("--site=".length).trim().toLowerCase();
     else if (arg.startsWith("--output-root=")) options.outputRoot = path.resolve(arg.slice("--output-root=".length));
-    else if (arg.startsWith("--api-root=")) options.apiRoot = path.resolve(arg.slice("--api-root=".length));
+    else if (arg.startsWith("--env-file=")) options.envFile = path.resolve(arg.slice("--env-file=".length));
+    // 兼容旧命令：原 api-root 的环境文件位于 API 同级 .env.production。
+    else if (arg.startsWith("--api-root=")) {
+      const apiRoot = path.resolve(arg.slice("--api-root=".length));
+      options.envFile = path.resolve(apiRoot, "../.env.production");
+    }
     else if (arg.startsWith("--crawl-task-id=") && Object.hasOwn(options, "crawlTaskId")) {
       options.crawlTaskId = arg.slice("--crawl-task-id=".length).trim();
     } else if (arg === "--allow-missing-files" && Object.hasOwn(options, "allowMissingFiles")) {
@@ -331,36 +429,52 @@ function parseCommonArgs(argv, extra = {}) {
   return options;
 }
 
-function loadApiEnvironment(apiRoot) {
-  const candidates = [
-    process.env.PROJECT_RECOMMENDATION_ENV,
-    path.join(apiRoot, ".env"),
-    path.resolve(apiRoot, "../.env.production"),
-  ].filter(Boolean);
-  const envPath = candidates.find((candidate) => fs.existsSync(candidate));
-  if (!envPath) {
-    throw new Error(`API environment file does not exist; checked: ${candidates.join(", ")}`);
+function loadStorageEnvironment(environmentSource = DEFAULT_ENV_FILE, requirements = {}) {
+  let envPath = path.resolve(environmentSource || DEFAULT_ENV_FILE);
+  if (fs.existsSync(envPath) && fs.statSync(envPath).isDirectory()) {
+    const candidates = [path.join(envPath, ".env"), path.resolve(envPath, "../.env.production")];
+    envPath = candidates.find((candidate) => fs.existsSync(candidate)) || candidates[0];
   }
+  if (!fs.existsSync(envPath)) throw new Error(`Environment file does not exist: ${envPath}`);
   if (typeof process.loadEnvFile !== "function") {
     throw new Error("Node.js 20.12+ is required because process.loadEnvFile() is unavailable");
   }
-  process.loadEnvFile(envPath);
-  for (const name of ["DATABASE_URL", "MONGODB_URL", "MONGODB_DATABASE", "MINIO_ENDPOINT"] ) {
-    if (!process.env[name]) throw new Error(`${name} is required in ${envPath}`);
+  // 本地 .env 保存经核验的实际 MySQL；--env-file 可补充 MongoDB/MinIO。
+  // process.loadEnvFile 保留已存在变量，因此按“本地配置 -> 补充配置”加载；
+  // 进程显式环境仍具有最高优先级。外部配置中的旧 DATABASE_URL 不会覆盖
+  // 当前数据库，同时无需复制或提交任何密钥。
+  const explicitEnvironment = { ...process.env };
+  const sources = envPath === DEFAULT_ENV_FILE
+    ? [DEFAULT_ENV_FILE]
+    : [DEFAULT_ENV_FILE, envPath];
+  for (const source of sources) {
+    if (fs.existsSync(source)) process.loadEnvFile(source);
   }
+  Object.assign(process.env, explicitEnvironment);
+  const required = ["DATABASE_URL"];
+  if (requirements.mongo) required.push("MONGODB_URL", "MONGODB_DATABASE");
+  if (requirements.minio) required.push("MINIO_ENDPOINT");
+  for (const name of required) {
+    if (!process.env[name]) {
+      throw new Error(
+        `${name} is required in process environment, ${DEFAULT_ENV_FILE}, or ${envPath}`,
+      );
+    }
+  }
+  return envPath;
 }
 
-function requireFromApi(apiRoot, packageName) {
+function requireLocal(packageName) {
   try {
-    return require(require.resolve(packageName, { paths: [apiRoot] }));
+    return require(require.resolve(packageName, { paths: [CRAWLER_PRISMA_ROOT] }));
   } catch (error) {
-    throw new Error(`Cannot load ${packageName} from ${apiRoot}; run npm --prefix ${apiRoot} ci first (${error.message})`);
+    throw new Error(`Cannot load local ${packageName}; run npm ci in ${CRAWLER_PRISMA_ROOT} (${error.message})`);
   }
 }
 
-async function openStores(apiRoot = DEFAULT_API_ROOT, requirements = {}) {
-  loadApiEnvironment(apiRoot);
-  const { PrismaClient } = requireFromApi(apiRoot, "@prisma/client");
+async function openStores(environmentSource = DEFAULT_ENV_FILE, requirements = {}) {
+  loadStorageEnvironment(environmentSource, requirements);
+  const { PrismaClient } = requireLocal("@prisma/client");
   const prisma = new PrismaClient();
   await prisma.$connect();
 
@@ -368,7 +482,7 @@ async function openStores(apiRoot = DEFAULT_API_ROOT, requirements = {}) {
   let mongo = null;
   let ObjectId = null;
   if (requirements.mongo) {
-    const mongodb = requireFromApi(apiRoot, "mongodb");
+    const mongodb = requireLocal("mongodb");
     ObjectId = mongodb.ObjectId;
     mongoClient = new mongodb.MongoClient(process.env.MONGODB_URL);
     await mongoClient.connect();
@@ -377,7 +491,7 @@ async function openStores(apiRoot = DEFAULT_API_ROOT, requirements = {}) {
 
   let minio = null;
   if (requirements.minio) {
-    const { Client } = requireFromApi(apiRoot, "minio");
+    const { Client } = requireLocal("minio");
     minio = new Client({
       endPoint: process.env.MINIO_ENDPOINT,
       port: Number(process.env.MINIO_PORT || 9000),
@@ -439,7 +553,7 @@ function deduplicate(records, keyBuilder) {
 }
 
 module.exports = {
-  DEFAULT_API_ROOT,
+  DEFAULT_ENV_FILE,
   DEFAULT_OUTPUT_ROOT,
   SITE_CONFIG,
   assertMaxLength,
@@ -449,6 +563,8 @@ module.exports = {
   deduplicate,
   iterateJsonNotices,
   jsonNoticeFiles,
+  loadStorageEnvironment,
+  loadTraceSources,
   nullableString,
   openStores,
   parseCommonArgs,

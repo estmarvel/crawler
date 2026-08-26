@@ -8,8 +8,7 @@ from crawler_scrapy.sites.bitbid.exporter import BitbidMultiFormatPipeline
 PROJECT_LABELS = {"engineering": "工程", "goods": "货物", "service": "服务"}
 CATEGORY_ROUTES = {
     "tender": ("招标公告", "招标公告"),
-    "change": ("变更公告", "招标公告"),
-    "termination": ("终止公告", "招标公告"),
+    "correction": ("更正结果公示", "更正结果公示"),
     "candidate": ("中标候选人公示", "中标候选人公示"),
     "award": ("结果公示", "中标结果公示"),
 }
@@ -51,16 +50,8 @@ class Trade365MultiFormatPipeline(BitbidMultiFormatPipeline):
                 f"中招联合山西栏目与Schema不一致：subtype={subtype} type={actual_type}"
             )
         record = self._build_record(adapter, schema_type)
-        if subtype.startswith("termination."):
-            record["公告类型"] = "TERMINATION"
         json_record = self._build_json_record(adapter, schema_type, record)
-        csv_writer = self._get_csv_writer(route)
-        self._get_json_path(route)
-        self._append_json_record(route, json_record)
-        csv_writer.writerow(
-            {key: self._serialize_csv(value) for key, value in record.items()}
-        )
-        self._csv_files[route].flush()
+        self._write_formats(route, record, json_record)
 
         field_meta = dict(adapter.get("field_meta") or {})
         dedup = field_meta.get("_dedup") or {}

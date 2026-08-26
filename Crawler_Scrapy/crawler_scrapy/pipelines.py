@@ -25,7 +25,7 @@ from crawler_scrapy.ai.html_extractor import (
     html_to_text,
 )
 from crawler_scrapy.schemas.notice_fields import (
-    ANNOUNCEMENT_TYPES,
+    ALL_NOTICE_TYPES,
     NOTICE_SCHEMA_VERSION,
     SYSTEM_FIELDS,
     TYPE_OUTPUT_BASENAMES,
@@ -45,7 +45,7 @@ from crawler_scrapy.storage.dedup import (
 
 
 TRACE_FIELD = "_trace"
-TRACE_SCHEMA_VERSION = "1.0"
+TRACE_SCHEMA_VERSION = "2.0"
 
 
 def _safe_path_part(value: Any, fallback: str = "unknown", max_length: int = 100) -> str:
@@ -136,37 +136,6 @@ def _to_json_compatible(value: Any) -> Any:
     return value
 
 
-def _raw_html_text(value: Any) -> str | None:
-    """把快照输入转换为 MongoDB rawHtml 可直接保存的文本。"""
-
-    if value in (None, ""):
-        return None
-    if isinstance(value, str):
-        return value
-    if isinstance(value, (bytes, bytearray, memoryview)):
-        raw = bytes(value)
-        for encoding in ("utf-8-sig", "gb18030"):
-            try:
-                return raw.decode(encoding)
-            except UnicodeDecodeError:
-                continue
-        return raw.decode("utf-8", errors="replace")
-    return str(value)
-
-
-def _sha256_json(value: Any) -> str | None:
-    if value in (None, "", {}, []):
-        return None
-    payload = json.dumps(
-        _to_json_compatible(value),
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        default=str,
-    ).encode("utf-8")
-    return hashlib.sha256(payload).hexdigest()
-
-
 class NoticeFilesPipeline(FilesPipeline):
     """下载公告附件并回写数据库附件表的预设字段。
 
@@ -198,9 +167,19 @@ class NoticeFilesPipeline(FilesPipeline):
         if not self.enabled:
             return []
         requests = super().get_media_requests(item, info)
-        referer = str(ItemAdapter(item).get("detail_url") or "").strip()
-        for index, request in enumerate(requests):
-            request.meta["_notice_attachment_index"] = index
+        adapter = ItemAdapter(item)
+        referer = str(adapter.get("detail_url") or "").strip()
+        attachment_indices = self._downloadable_attachment_indices(
+            adapter.get("attachments") or []
+        )
+        for request_index, request in enumerate(requests):
+            if request_index >= len(attachment_indices):
+                raise RuntimeError(
+                    "file_urls 与 attachments 中的可下载附件数量不一致"
+                )
+            request.meta["_notice_attachment_index"] = attachment_indices[
+                request_index
+            ]
             attachment_timeout = getattr(
                 self, "attachment_download_timeout", None
             )
@@ -217,6 +196,24 @@ class NoticeFilesPipeline(FilesPipeline):
             if referer:
                 request.headers.setdefault(b"Referer", referer.encode("utf-8"))
         return requests
+
+    @staticmethod
+    def _downloadable_attachment_indices(attachments: Any) -> list[int]:
+        """返回有下载 URL 的原始附件下标，避免元数据附件造成回写错位。"""
+
+        result: list[int] = []
+        for index, attachment in enumerate(attachments):
+            if not isinstance(attachment, Mapping):
+                continue
+            url = (
+                attachment.get("file_url")
+                or attachment.get("download_url")
+                or attachment.get("url")
+                or attachment.get("preview_url")
+            )
+            if str(url or "").strip():
+                result.append(index)
+        return result
 
     def file_path(self, request, response=None, info=None, *, item=None) -> str:
         adapter = ItemAdapter(item) if item is not None else None
@@ -274,10 +271,11 @@ class NoticeFilesPipeline(FilesPipeline):
 
         adapter = ItemAdapter(item)
         attachments = [dict(value) for value in adapter.get("attachments") or []]
-        for index, (ok, result) in enumerate(results):
-            if index >= len(attachments):
+        attachment_indices = self._downloadable_attachment_indices(attachments)
+        for result_index, (ok, result) in enumerate(results):
+            if result_index >= len(attachment_indices):
                 break
-            attachment = attachments[index]
+            attachment = attachments[attachment_indices[result_index]]
             if ok:
                 attachment["storage_path"] = result.get("path") or None
                 attachment["file_hash"] = result.get("checksum") or None
@@ -382,13 +380,14 @@ class NoticeDedupPipeline:
 
 
 class HtmlSnapshotPipeline:
-    """将每条公告的 HTML 原文保存为独立快照文件。
+    """将每条公告的 HTML 和源站 payload 保存为独立快照文件。
 
     输出示例：
         output/<网站代码>/snapshots/03_招标公告/<公告ID>_<哈希>.html
 
-    CSV 只记录快照路径和 SHA256；JSON `_trace.rawHtml` 另保留一份可独立
-    搬运的溯源包，Mongo 导入时会规范为唯一的 rawHtml 字段。
+    CSV/JSON 只记录 HTML 快照路径和 SHA256；原始 payload 的路径和 SHA256
+    写入紧凑 `_trace.payloadSnapshot`。导入时按路径读取原文，不在结果 JSON
+    中重复内嵌 HTML、正文或原始接口响应。
     """
 
     @classmethod
@@ -427,10 +426,58 @@ class HtmlSnapshotPipeline:
     def process_item(self, item):
         spider = self.crawler.spider
         adapter = ItemAdapter(item)
+        adapter["payload_snapshot_path"] = ""
+        adapter["payload_snapshot_sha256"] = ""
         if not self.enabled:
             adapter["snapshot_path"] = ""
             adapter["snapshot_sha256"] = ""
             return item
+
+        notice_type = normalize_notice_type(adapter.get("notice_type"))
+        if notice_type not in TYPE_OUTPUT_BASENAMES:
+            raise DropItem(f"无法为未知公告类型保存快照：{notice_type!r}")
+
+        if self.site_dir is None:
+            self.site_dir = _ensure_site_context(spider, self.output_root)
+
+        identity_seed = (
+            adapter.get("notice_id")
+            or adapter.get("title")
+            or adapter.get("detail_url")
+            or "unknown_notice"
+        )
+
+        raw_data = adapter.get("raw_data")
+        if raw_data not in (None, "", {}, []):
+            payload_bytes = json.dumps(
+                _to_json_compatible(raw_data),
+                ensure_ascii=False,
+                indent=2,
+                default=str,
+            ).encode("utf-8")
+            payload_digest = hashlib.sha256(payload_bytes).hexdigest()
+            payload_identity = _safe_path_part(
+                identity_seed,
+                payload_digest[:16],
+                max_length=80,
+            )
+            payload_dir = (
+                self.site_dir
+                / "payloads"
+                / TYPE_OUTPUT_BASENAMES[notice_type]
+            )
+            payload_dir.mkdir(parents=True, exist_ok=True)
+            payload_path = payload_dir / (
+                f"{payload_identity}_{payload_digest[:12]}.json"
+            )
+            if not payload_path.exists():
+                temp_path = payload_path.with_suffix(".json.tmp")
+                temp_path.write_bytes(payload_bytes)
+                temp_path.replace(payload_path)
+            adapter["payload_snapshot_path"] = (
+                payload_path.relative_to(self.output_root).as_posix()
+            )
+            adapter["payload_snapshot_sha256"] = payload_digest
 
         raw_bytes = self._to_bytes(adapter.get("raw_html"))
         if not raw_bytes:
@@ -447,10 +494,6 @@ class HtmlSnapshotPipeline:
             adapter["snapshot_sha256"] = ""
             return item
 
-        notice_type = normalize_notice_type(adapter.get("notice_type"))
-        if notice_type not in TYPE_OUTPUT_BASENAMES:
-            raise DropItem(f"无法为未知公告类型保存快照：{notice_type!r}")
-
         digest = hashlib.sha256(raw_bytes).hexdigest()
         identity = (
             adapter.get("notice_id")
@@ -459,9 +502,6 @@ class HtmlSnapshotPipeline:
             or digest[:16]
         )
         safe_identity = _safe_path_part(identity, digest[:16], max_length=80)
-
-        if self.site_dir is None:
-            self.site_dir = _ensure_site_context(spider, self.output_root)
 
         snapshot_dir = (
             self.site_dir
@@ -496,7 +536,7 @@ class NoticeSchemaPipeline:
         adapter = ItemAdapter(item)
 
         notice_type_name = normalize_notice_type(adapter.get("notice_type"))
-        if notice_type_name not in ANNOUNCEMENT_TYPES:
+        if notice_type_name not in ALL_NOTICE_TYPES:
             raise DropItem(
                 f"不支持的公告类型：{adapter.get('notice_type')!r}; "
                 f"支持类型：{', '.join(ANNOUNCEMENT_TYPES)}"
@@ -891,8 +931,8 @@ class NoticeMultiFormatPipeline:
         ├── json/<公告类型>.json
         └── snapshots/<公告类型>/*.html
 
-    JSON 与 CSV 保持同一套主字段。JSON 额外带 `_trace` 溯源包；CSV 不加入
-    原始载荷和 HTML，避免改变既有表头及产生超大单元格。
+    CSV 与 JSON 都保持完整固定业务字段；JSON 额外带紧凑 `_trace` 溯源包。
+    原始 payload 和 HTML 保存为独立快照，避免重复内嵌大段内容。
 
     CSV 和 JSON 均以追加方式保存，不在 Spider 启动时清空。相同公告身份与
     内容指纹由 NoticeDedupPipeline 拦截；内容变化会追加为新版本。
@@ -954,6 +994,10 @@ class NoticeMultiFormatPipeline:
                 "NOTICE_EXPORT_TRACE",
                 True,
             ),
+            export_csv_enabled=crawler.settings.getbool(
+                "NOTICE_EXPORT_CSV_ENABLED",
+                True,
+            ),
         )
         obj.crawler = crawler
         return obj
@@ -965,12 +1009,14 @@ class NoticeMultiFormatPipeline:
         include_diagnostics: bool = True,
         create_empty_files: bool = False,
         include_trace: bool = True,
+        export_csv_enabled: bool = True,
     ):
         self.output_root = output_root
         self.include_meta = include_meta
         self.include_diagnostics = include_diagnostics
         self.create_empty_files = create_empty_files
         self.include_trace = include_trace
+        self.export_csv_enabled = export_csv_enabled
         self.site_dir: Path | None = None
         self.csv_dir: Path | None = None
         self.json_dir: Path | None = None
@@ -985,12 +1031,14 @@ class NoticeMultiFormatPipeline:
         self.site_dir = _ensure_site_context(spider, self.output_root)
         self.csv_dir = self.site_dir / "csv"
         self.json_dir = self.site_dir / "json"
-        self.csv_dir.mkdir(parents=True, exist_ok=True)
+        if self.export_csv_enabled:
+            self.csv_dir.mkdir(parents=True, exist_ok=True)
         self.json_dir.mkdir(parents=True, exist_ok=True)
 
         if self.create_empty_files:
-            for notice_type in ANNOUNCEMENT_TYPES:
-                self._get_csv_writer(notice_type)
+            for notice_type in ALL_NOTICE_TYPES:
+                if self.export_csv_enabled:
+                    self._get_csv_writer(notice_type)
                 self._get_json_path(notice_type)
 
     def close_spider(self):
@@ -1015,6 +1063,61 @@ class NoticeMultiFormatPipeline:
         if isinstance(value, date):
             return value.isoformat()
         return value
+
+    @staticmethod
+    def _inspect_json_array(path: Path) -> tuple[bool, int]:
+        """常量内存检查数组边界，返回“是否有记录”和结束括号位置。"""
+
+        whitespace = b" \t\r\n"
+        with path.open("rb") as file_object:
+            file_object.seek(0, 2)
+            size = file_object.tell()
+            if size <= 0:
+                raise RuntimeError(f"现有JSON为空，拒绝追加：{path}")
+
+            opening_position: int | None = None
+            offset = 0
+            while offset < size and opening_position is None:
+                file_object.seek(offset)
+                chunk = file_object.read(min(8192, size - offset))
+                for index, value in enumerate(chunk):
+                    if value not in whitespace:
+                        opening_position = offset + index
+                        if value != ord("["):
+                            raise RuntimeError(f"现有JSON不是数组，拒绝追加：{path}")
+                        break
+                offset += len(chunk)
+
+            closing_position: int | None = None
+            offset = size
+            while offset > 0 and closing_position is None:
+                start = max(0, offset - 8192)
+                file_object.seek(start)
+                chunk = file_object.read(offset - start)
+                for index in range(len(chunk) - 1, -1, -1):
+                    value = chunk[index]
+                    if value not in whitespace:
+                        closing_position = start + index
+                        if value != ord("]"):
+                            raise RuntimeError(
+                                f"现有JSON缺少数组结束符，拒绝追加：{path}"
+                            )
+                        break
+                offset = start
+
+            if opening_position is None or closing_position is None:
+                raise RuntimeError(f"现有JSON不是完整数组，拒绝追加：{path}")
+            if closing_position < opening_position:
+                raise RuntimeError(f"现有JSON数组边界错误，拒绝追加：{path}")
+
+            file_object.seek(opening_position + 1)
+            remaining = closing_position - opening_position - 1
+            while remaining > 0:
+                chunk = file_object.read(min(8192, remaining))
+                if any(value not in whitespace for value in chunk):
+                    return True, closing_position
+                remaining -= len(chunk)
+        return False, closing_position
 
     def _fieldnames(self, notice_type: str) -> list[str]:
         """构造表头，并保证附件为最后一列。"""
@@ -1081,15 +1184,7 @@ class NoticeMultiFormatPipeline:
         basename = TYPE_OUTPUT_BASENAMES[notice_type]
         path = self.json_dir / f"{basename}.json"
         if path.exists() and path.stat().st_size > 0:
-            try:
-                rows = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, ValueError) as exc:
-                raise RuntimeError(
-                    f"现有JSON无法读取，拒绝覆盖：{path}: {exc}"
-                ) from exc
-            if not isinstance(rows, list):
-                raise RuntimeError(f"现有JSON不是数组，拒绝覆盖：{path}")
-            has_records = bool(rows)
+            has_records, _ = self._inspect_json_array(path)
         else:
             path.write_text("[\n]\n", encoding="utf-8")
             has_records = False
@@ -1106,10 +1201,7 @@ class NoticeMultiFormatPipeline:
         """只替换数组结尾的 ``]``，追加后文件仍是合法 JSON。"""
 
         path = self._get_json_path(notice_type)
-        content = path.read_bytes()
-        closing_position = content.rfind(b"]")
-        if closing_position < 0:
-            raise RuntimeError(f"现有JSON缺少数组结束符，拒绝覆盖：{path}")
+        _, closing_position = self._inspect_json_array(path)
         serialized = json.dumps(
             _to_json_compatible(record),
             ensure_ascii=False,
@@ -1149,58 +1241,41 @@ class NoticeMultiFormatPipeline:
         return record
 
     def _build_trace(self, adapter: ItemAdapter) -> dict[str, Any]:
-        """构造与 MongoDB raw_notices 字段一一对应的溯源包。"""
+        """构造无正文、HTML、附件和顶层元数据副本的紧凑溯源包。"""
 
-        raw_data = adapter.get("raw_data")
-        payload = raw_data if isinstance(raw_data, Mapping) else {
-            "value": raw_data,
-        } if raw_data is not None else {
-            "sourceNoticeId": str(adapter.get("notice_id") or ""),
-            "sourceUrl": str(adapter.get("detail_url") or ""),
-        }
-        raw_html = _raw_html_text(adapter.get("raw_html"))
         raw_text = str(adapter.get("raw_text") or "") or None
         field_meta = dict(adapter.get("field_meta") or {})
+        # _dedup 只供导出事务提交使用；公告身份和内容指纹已有稳定顶层字段，
+        # 不属于字段抽取证据，避免在每条 JSON 中重复保存。
+        field_meta.pop("_dedup", None)
+        response_metadata = dict(adapter.get("response_metadata") or {})
         extraction_version = str(adapter.get("extraction_version") or "") or None
-        return {
+        payload_path = str(adapter.get("payload_snapshot_path") or "") or None
+        payload_sha256 = str(
+            adapter.get("payload_snapshot_sha256") or ""
+        ) or None
+        result: dict[str, Any] = {
             "schemaVersion": TRACE_SCHEMA_VERSION,
             "noticeSchemaVersion": NOTICE_SCHEMA_VERSION,
-            "payload": payload,
-            "rawHtml": raw_html,
-            "rawText": raw_text,
-            "responseMetadata": dict(adapter.get("response_metadata") or {}),
             "crawlerVersion": extraction_version,
-            "extractionModel": str(adapter.get("extraction_model") or "") or None,
             "extractionVersion": extraction_version,
-            "fieldMeta": field_meta,
-            "capturedAt": adapter.get("crawl_time"),
-            # 这些值在 MySQL/MongoDB 中大多有正式字段；同时保留一份导出时
-            # 视图，覆盖 notice_subtype、缺失字段和本地快照信息等诊断字段。
-            "exportMetadata": {
-                "platformName": str(adapter.get("platform") or "") or None,
-                "platformCode": str(adapter.get("platform_code") or "") or None,
-                "sourceNoticeId": str(adapter.get("notice_id") or "") or None,
-                "noticeType": str(adapter.get("notice_type") or "") or None,
-                "noticeSubtype": str(adapter.get("notice_subtype") or "") or None,
-                "title": str(adapter.get("title") or "") or None,
-                "publishTime": adapter.get("publish_time"),
-                "detailUrl": str(adapter.get("detail_url") or "") or None,
-                "parseStatus": str(adapter.get("parse_status") or "") or None,
-                "isVerified": bool(adapter.get("is_verified")),
-                "missingFields": list(adapter.get("missing_fields") or []),
-                "snapshotPath": str(adapter.get("snapshot_path") or "") or None,
-                "snapshotSha256": str(adapter.get("snapshot_sha256") or "") or None,
-                "attachments": list(adapter.get("attachments") or []),
-            },
-            "integrity": {
-                "contentFingerprint": str(adapter.get("fingerprint") or "") or None,
-                "payloadSha256": _sha256_json(payload),
-                "rawHtmlSha256": hashlib.sha256(raw_html.encode("utf-8")).hexdigest()
-                if raw_html else None,
-                "rawTextSha256": hashlib.sha256(raw_text.encode("utf-8")).hexdigest()
-                if raw_text else None,
-            },
         }
+        if payload_path and payload_sha256:
+            result["payloadSnapshot"] = {
+                "path": payload_path,
+                "sha256": payload_sha256,
+            }
+        if response_metadata:
+            result["responseMetadata"] = response_metadata
+        if field_meta:
+            result["fieldMeta"] = field_meta
+        if raw_text:
+            result["integrity"] = {
+                "rawTextSha256": hashlib.sha256(
+                    raw_text.encode("utf-8")
+                ).hexdigest(),
+            }
+        return result
 
     def _build_json_record(
         self,
@@ -1213,18 +1288,38 @@ class NoticeMultiFormatPipeline:
             result[TRACE_FIELD] = self._build_trace(adapter)
         return result
 
+    def _write_formats(
+        self,
+        route: str,
+        record: Mapping[str, Any],
+        json_record: Mapping[str, Any],
+    ) -> None:
+        """按路由原子追加 JSON，并按配置决定是否同时写 CSV。
+
+        专用站点导出器通过虚拟路由控制文件名，因此该公共入口必须调用
+        可重写的 ``_get_json_path``/``_get_csv_writer``，不能把路由提前
+        规范化为公告类型。JSON 永远保存；CSV 可由站点任务显式关闭。
+        """
+
+        self._get_json_path(route)
+        self._append_json_record(route, json_record)
+        if not self.export_csv_enabled:
+            return
+        csv_writer = self._get_csv_writer(route)
+        csv_writer.writerow(
+            {
+                key: self._serialize_csv(value)
+                for key, value in record.items()
+            }
+        )
+        self._csv_files[route].flush()
+
     def process_item(self, item):
         adapter = ItemAdapter(item)
         notice_type = normalize_notice_type(adapter.get("notice_type"))
         record = self._build_record(adapter, notice_type)
         json_record = self._build_json_record(adapter, notice_type, record)
 
-        csv_writer = self._get_csv_writer(notice_type)
-        self._get_json_path(notice_type)
-        csv_row = {
-            key: self._serialize_csv(value)
-            for key, value in record.items()
-        }
         field_meta = dict(adapter.get("field_meta") or {})
         dedup = field_meta.get("_dedup") or {}
         store = getattr(self.crawler, "_notice_dedup_stores", {}).get(
@@ -1232,9 +1327,7 @@ class NoticeMultiFormatPipeline:
         )
 
         try:
-            self._append_json_record(notice_type, json_record)
-            csv_writer.writerow(csv_row)
-            self._csv_files[notice_type].flush()
+            self._write_formats(notice_type, record, json_record)
             if store is not None and dedup:
                 store.commit(
                     identity=dedup["identity"],

@@ -23,3 +23,6 @@ class JiubangSpider(HuaxinSpider):
     allowed_domains = ["www.bjjbkj.cn"]
     parser_version = parser_class.parser_version
     extraction_model_name = "jiubang-rule-parser"
+    ai_metadata_key = "jiubangHybridAi"
+    ai_trusted_fields_meta_key = "jiubangApiTrustedFields"
+    ai_log_name = "玖邦"

@@ -2,6 +2,12 @@
 set -Eeuo pipefail
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 cd "${ROOT}"
+ENV_FILE="${CRAWLER_AI_ENV_FILE:-${ROOT}/.env}"
+if [[ -f "${ENV_FILE}" ]]; then
+  set -a
+  source "${ENV_FILE}"
+  set +a
+fi
 PY=""
 for candidate in \
   "${CRAWLER_PYTHON_COMMAND:-}" \

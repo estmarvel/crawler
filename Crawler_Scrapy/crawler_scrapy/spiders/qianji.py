@@ -9,10 +9,23 @@ from typing import Any, Mapping
 from scrapy import Request
 from scrapy.http import Response
 
-from crawler_scrapy.schemas.notice_fields import coerce_datetime
+from crawler_scrapy.schemas.notice_fields import ANNOUNCEMENT_SCHEMAS, coerce_datetime
 from crawler_scrapy.sites.qianji import config
+from crawler_scrapy.sites.qianji.ai_provider import API_KEY_ENV, BASE_URL, MODEL
 from crawler_scrapy.sites.qianji.parser import QianjiParser
 from crawler_scrapy.spiders.base_notice import BaseNoticeSpider
+
+
+QIANJI_AI_DERIVED_OR_FIXED_FIELDS = frozenset(
+    {
+        "项目性质",
+        "发布日期",
+        "发布网站",
+        "项目编号/招标编号",
+        "招标编号/项目编号",
+        "项目类型/行业分类",
+    }
+)
 
 
 class QianjiSpider(BaseNoticeSpider):
@@ -20,8 +33,51 @@ class QianjiSpider(BaseNoticeSpider):
     platform_name = config.PLATFORM_NAME
     platform_code = config.PLATFORM_CODE
     allowed_domains = ["www.qianjilink.com"]
-    parser_version = "qianji-v4-template-verified"
-    extraction_model_name = "qianji-site-rule-parser"
+    parser_version = "qianji-ai-v2"
+    extraction_model_name = "qianji-ai-parser"
+    # 千极数把“招标公告”和“变更公告”都映射到 TENDER Schema；验证配额
+    # 仍按五个源栏目统计，避免前一个栏目占满 50 条后完全看不到变更样本。
+    ai_validation_quota_by_source_category = True
+    ai_validation_quota_types = ("plan", "tender", "change", "candidate", "award")
+
+    # 按《八类公告重要业务字段提取标准》和 C 方案：只将真实样本中
+    # 持续存在边界污染的字段进入常规候选窗口 AI。编号、发布信息、
+    # 时间、金额和表格对齐字段由 API/DOM/规则优先，只在缺失、
+    # 含 HTML、列表错位或其他明确异常时动态升级。
+    ai_extract_fields = {
+        "招标计划": (
+            "建设内容及规模",
+        ),
+        "招标公告": (
+            "资金来源",
+            "项目规模",
+            "招标内容与范围",
+            "质量要求",
+            "获取方式",
+            "递交方法",
+            "投标保证金方式",
+        ),
+        "中标候选人公示": (),
+        "中标结果公示": (),
+        "更正结果公示": (),
+    }
+    # 这些字段确实需要 AI 纠正规则边界，但并非每条公告都会出现。仅在规则
+    # 已命中或正文出现明确标签时加入本条请求，减少模型空输出和无效调用。
+    ai_sparse_review_fields = {}
+    ai_candidate_fields = {
+        notice_type: tuple(
+            field
+            for field in ANNOUNCEMENT_SCHEMAS[notice_type]
+            if field not in QIANJI_AI_DERIVED_OR_FIXED_FIELDS
+        )
+        for notice_type in (
+            "招标计划",
+            "招标公告",
+            "中标候选人公示",
+            "中标结果公示",
+            "更正结果公示",
+        )
+    }
 
     custom_settings = {
         "ROBOTSTXT_OBEY": False,
@@ -32,12 +88,31 @@ class QianjiSpider(BaseNoticeSpider):
         "NOTICE_SNAPSHOT_ENABLED": True,
         "NOTICE_SNAPSHOT_REQUIRED": False,
         "NOTICE_ATTACHMENT_DOWNLOAD_ENABLED": True,
+        "NOTICE_AI_API_KEY_ENV": API_KEY_ENV,
+        "NOTICE_AI_BASE_URL": BASE_URL,
+        "NOTICE_AI_MODEL": MODEL,
+        "NOTICE_AI_JSON_MODE": True,
+        "NOTICE_AI_ENABLE_THINKING": False,
+        "NOTICE_AI_INCLUDE_OPTIONAL_FIELDS": True,
+        # 小样本验收阶段限制 Item 并行并拉开请求起始时间，避免同时提交
+        # 多个 GLM-5.2 请求后触发限流，也防止 AI 阶段反向拖慢公告落盘。
+        "CONCURRENT_ITEMS": 3,
+        "REACTOR_THREADPOOL_MAXSIZE": 4,
+        "NOTICE_AI_MIN_INTERVAL": 2.0,
+        "NOTICE_AI_TIMEOUT": 90.0,
+        "NOTICE_AI_RETRY_TIMES": 0,
+        # C2 对长字段只返回原文行范围，不再重复生成整段正文。
+        "NOTICE_AI_MAX_OUTPUT_TOKENS": 1200,
     }
 
     @classmethod
     def update_settings(cls, settings) -> None:
         super().update_settings(settings)
         pipelines = settings.getdict("ITEM_PIPELINES")
+        pipelines["crawler_scrapy.pipelines.AiHtmlExtractionPipeline"] = None
+        pipelines[
+            "crawler_scrapy.sites.qianji.hybrid_ai.QianjiHybridAiExtractionPipeline"
+        ] = 200
         pipelines["crawler_scrapy.pipelines.NoticeMultiFormatPipeline"] = None
         pipelines["crawler_scrapy.sites.qianji.exporter.QianjiMultiFormatPipeline"] = 300
         settings.set("ITEM_PIPELINES", pipelines, priority="spider")
@@ -237,6 +312,25 @@ class QianjiSpider(BaseNoticeSpider):
         feed, detail = str(context["feed"]), context["detail"]
         notice_type, data, attachments, raw_html, raw_text = QianjiParser.parse(feed, detail, pdf_text=pdf_text)
         notice_id = str(detail.get("id") or context["list_record"].get("id") or "")
+        api_trusted_fields = ["发布日期"]
+        if detail.get("projectCode"):
+            api_trusted_fields.append("项目编号")
+        if detail.get("bidSituation"):
+            api_trusted_fields.append("项目性质")
+        if detail.get("bidTypeName") and notice_type in {"招标计划", "中标结果公示"}:
+            api_trusted_fields.append("招标方式")
+        if detail.get("zbUnitName"):
+            api_trusted_fields.append(
+                "招标人名称"
+                if notice_type == "招标计划"
+                else (
+                    "招标人/采购人名称"
+                    if notice_type == "招标公告"
+                    else "招标人/采购人"
+                )
+            )
+        if detail.get("dlUnitName") and notice_type != "招标计划":
+            api_trusted_fields.append("招标代理机构")
         return self.build_notice_item(
             notice_type=notice_type, notice_subtype=feed, notice_id=notice_id,
             title=str(detail.get("title") or ""), publish_time=detail.get("noticeStartTime") or detail.get("createTime"),
@@ -248,6 +342,10 @@ class QianjiSpider(BaseNoticeSpider):
                 "site_parser": self.extraction_model_name,
                 "feed": feed,
                 "project_type": config.FEEDS[feed][1],
+                "qianjiIdentifierExtraction": QianjiParser.identifier_source_metadata(
+                    detail, raw_text
+                ),
+                "qianjiApiTrustedFields": list(dict.fromkeys(api_trusted_fields)),
             },
             response_metadata=dict(context.get("response_metadata") or {}),
             attachments=attachments,

@@ -33,6 +33,7 @@
 **/new_output/
 **/new_output_*/
 **/test_output/
+**/validation_output/
 **/logs/
 **/httpcache/
 **/jobstate/
@@ -49,6 +50,9 @@
 *.archive
 *.archive.gz
 *.dump
+
+# Generated datasets kept locally; retain the corresponding crawler source.
+/zxj/**/FinalData.json
 
 # Generated reports and transient runtime files
 **/reports/

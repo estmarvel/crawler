@@ -303,7 +303,7 @@ ITEM_PIPELINES = {
     # 最先过滤已经保存过的“公告身份 + 内容指纹”，避免重复快照、AI和导出。
     "crawler_scrapy.pipelines.NoticeDedupPipeline": 40,
 
-    # 先保存详情页 HTML 原文快照，并写入快照路径和 SHA256。
+    # 先保存详情页 HTML 与源站 payload 快照，并写入路径和 SHA256。
     "crawler_scrapy.pipelines.HtmlSnapshotPipeline": 50,
 
     # 可选附件下载：只落盘并回写路径/哈希/大小/状态，不执行 OCR 或 AI。
@@ -311,6 +311,10 @@ ITEM_PIPELINES = {
 
     # 再规范公告类型、补齐该类型全部字段并统计缺失字段。
     "crawler_scrapy.pipelines.NoticeSchemaPipeline": 100,
+
+    # 默认为 0 时不做任何事；仅验收采集时在 AI 之前限制每类样本，
+    # 避免多子栏目站点重复消耗模型额度。
+    "crawler_scrapy.ai.validation_quota.AiValidationQuotaPipeline": 190,
 
     # 默认关闭；启用后只用 AI 补充规则解析仍为空的业务字段。
     "crawler_scrapy.pipelines.AiHtmlExtractionPipeline": 200,
@@ -329,6 +333,8 @@ ITEM_PIPELINES = {
 # output/<网站代码>/json/
 # output/<网站代码>/snapshots/<公告类型>/
 NOTICE_OUTPUT_ROOT = str(PROJECT_ROOT / "output")
+# 只用于独立验收目录；0 表示生产采集不限制。
+NOTICE_VALIDATION_MAX_PER_TYPE = 0
 # Can point to a stable directory while each API task uses an isolated output root.
 NOTICE_DEDUP_ROOT = NOTICE_OUTPUT_ROOT
 
@@ -348,8 +354,8 @@ NOTICE_EXPORT_DIAGNOSTICS = True
 # 多数网站只包含八类公告中的一部分，默认只创建实际抓到的类型文件。
 NOTICE_EXPORT_EMPTY_FILES = False
 
-# JSON 额外保存 `_trace` 溯源包，字段与 MongoDB raw_notices 对齐；CSV 仍只
-# 输出原有主字段，避免大段原始 JSON/HTML 改变既有表头。
+# JSON 额外保存紧凑 `_trace` 溯源包；原始 JSON/HTML 均独立落盘，避免正文、
+# HTML、附件和公共元数据在同一结果文件中重复。CSV 继续输出固定完整表头。
 NOTICE_EXPORT_TRACE = True
 
 # 启用跨运行去重。索引保存在 output/<网站代码>/state/notice_versions.json。
@@ -399,11 +405,18 @@ NOTICE_AI_MAX_CALLS = 100
 # 部分 OpenAI 兼容服务不支持 response_format，默认仅通过 Prompt 约束 JSON。
 NOTICE_AI_JSON_MODE = False
 
+# 支持思考/非思考双模式的兼容接口可设置 True/False；None 表示不发送。
+NOTICE_AI_ENABLE_THINKING = None
+
 # 默认只补必填字段；True 时连 Schema 中标为可选的业务字段也会尝试补全。
 NOTICE_AI_INCLUDE_OPTIONAL_FIELDS = False
 
 # 默认 AI 失败仅记录日志和统计，不丢弃规则已经成功提取的数据。
 NOTICE_AI_FAIL_ON_ERROR = False
+
+# JSON 是数据库导入和溯源的权威输出。默认保留 CSV 兼容能力；统一运行器会对
+# 9 个已接入混合 AI 的正式站点关闭 CSV，避免重复数据和额外磁盘占用。
+NOTICE_EXPORT_CSV_ENABLED = True
 
 
 # =============================================================================

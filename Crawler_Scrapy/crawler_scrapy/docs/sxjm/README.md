@@ -5,7 +5,7 @@
 五站统一框架与站点横向对照见
 [《五站爬虫详细实现说明》](../五站爬虫详细实现说明.md)。
 
-`sxjm` 复用现有 Scrapy 公告框架，默认采集首页全部四个频道，并按频道、栏目分别生成 JSON/CSV：
+`sxjm` 复用现有 Scrapy 公告框架，默认采集首页全部四个频道，并按频道、栏目分别生成 JSON：
 
 - `yfxm` 依法项目：招标计划、招标（预审）公告、中标候选人公示、结果公告、终止公告。
 - `zbxm` 招标项目：招标（预审）公告、中标候选人公示、中标公告、终止公告。
@@ -22,25 +22,22 @@
 2026-08-04 实际接口验证，依法项目招标栏目使用 `announcement_type=8`，其中同时包含普通招标、二次、延期和变更公告；`category=1&announcement_type=1` 当前 `total=0`，框架不再发送该空请求。
 
 每条 JSON 还包含统一 `_trace` 溯源包：解密后的原始列表记录、原始详情对象、
-列表请求参数、分页信息、列表/详情 HTTP 元数据、接口业务状态、完整 HTML、按 DOM
-顺序清洗的正文及 SHA-256。CSV 表头不变，也不包含 `_trace`。
+列表请求参数、分页信息、列表/详情 HTTP 元数据、接口业务状态、按 DOM
+顺序清洗的正文及 SHA-256。正式运行不再创建 CSV。
 
 该实现不要求修改数据库结构。导入时复用现有 MongoDB
 `raw_notices.payload/rawHtml/rawText/responseMetadata` 和
 `notice_extractions.evidence`，MySQL 只保存现有索引字段。
 
-SXJM 详情接口 `content` 中的原始公告 HTML 会同时保存为两种可追溯形式：
+SXJM 详情接口 `content` 中的原始公告 HTML 保存为独立快照：
 
 - 独立文件：`new_output/sxjm/snapshots/<公共Schema类型>/<公告ID>_<SHA256前缀>.html`；
-- JSON：`_trace.rawHtml` 保存同一份 HTML，`_trace.integrity.rawHtmlSha256`
-  保存完整哈希。
+- JSON 顶层只保存 `HTML快照路径`、`HTML快照SHA256` 引用。
 
-顶层 `HTML快照路径`、`HTML快照SHA256` 与
-`_trace.exportMetadata.snapshotPath/snapshotSha256` 保持一致。导入后原始 HTML
-对应 MongoDB `raw_notices.rawHtml`，快照定位信息保存在现有
-`responseMetadata.trace.exportMetadata`，无需修改数据库结构。若源站个别记录确实
-没有 HTML，仍保留 `_trace.payload` 中的解密详情 JSON 并记录告警，不会因为无法
-生成 HTML 文件而丢弃整条公告。
+解密后的原始列表/详情载荷单独保存到 `payloads/`，由
+`_trace.payloadSnapshot.path/sha256` 定位并校验。导入器读取两个快照，把原始 HTML
+和 payload 写入 MongoDB `raw_notices`，无需修改数据库结构。若源站个别记录确实
+没有 HTML，仍保留 payload 快照并记录告警，不会丢弃整条公告。
 
 ## 安装与运行
 
@@ -61,7 +58,7 @@ bash run_sxjm.sh --phase notices --all
 bash run_sxjm.sh --phase attachments
 ```
 
-公告阶段会先保存 HTML 快照，再导出 JSON/CSV；默认使用并发 2、每批 3~5 秒请求间隔、
+公告阶段会先保存 HTML 快照，再导出 JSON；默认使用并发 2、每批 3~5 秒请求间隔、
 自动限速、分批请求预算和批间冷却；一旦
 收到 403/429 会立即停爬，不会用高频重试继续冲击源站。它通过
 `new_output/sxjm/state/` 下的 JOBDIR、公告版本索引和阶段完成标记恢复：第一次
@@ -73,7 +70,7 @@ bash run_sxjm.sh --phase attachments
 `new_output/sxjm/attachments/<公告类型>/<公告ID>/`。未完成文件使用 `.part`
 后缀，下次运行通过 HTTP Range 续传；已完整落盘的附件按确定性路径跳过，不会
 重复下载。默认连接超时 30 秒、单次流读取超时 900 秒，并进行指数退避重试。
-完成后会同时回写 JSON 主记录、`_trace.exportMetadata.attachments` 和同名 CSV
+完成后只回写 JSON 顶层 `附件`
 附件列，确保附件与公告仍按公告 ID 一一对应。
 
 两个阶段都会在终端打印实时进度，并将完整日志写入
@@ -124,4 +121,4 @@ python -m crawler_scrapy.sites.sxjm.audit /tmp/sxjm-audit \
   --report /tmp/sxjm-audit/audit_report.json
 ```
 
-审计会验证 16 个有效 feed 的数量、源站类型与公共 Schema 的对应关系、正文与 `_trace.rawText` 一致性、候选人/成交人是否确实出现在正文，以及附件元数据完整性。源站正文为空模板但附件中可能含结果时只给出警告，不会猜测填值。
+审计会验证 16 个有效 feed 的数量、源站类型与公共 Schema 的对应关系、正文和快照完整性、候选人/成交人是否确实出现在正文，以及附件元数据完整性。源站正文为空模板但附件中可能含结果时只给出警告，不会猜测填值。

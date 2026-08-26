@@ -2,7 +2,7 @@
 "use strict";
 
 const { iterateJsonNotices, parseCommonArgs } = require("./lib/runtime");
-const { mapBusinessRecord } = require("./lib/business");
+const { isBusinessReady, mapBusinessRecord } = require("./lib/business");
 
 async function main() {
   const options = parseCommonArgs(process.argv.slice(2));
@@ -12,9 +12,14 @@ async function main() {
   }
   let checked = 0;
   let failed = 0;
+  let skipped = 0;
   const examples = [];
   for await (const record of iterateJsonNotices(options.outputRoot, options.sites)) {
     checked += 1;
+    if (!isBusinessReady(record)) {
+      skipped += 1;
+      continue;
+    }
     try {
       mapBusinessRecord(record, { includeContent: false });
     } catch (error) {
@@ -25,7 +30,7 @@ async function main() {
       console.log(`[映射审计] 已检查=${checked} 失败=${failed}`);
     }
   }
-  console.log(`Mapping audit complete: checked=${checked}, failed=${failed}`);
+  console.log(`Mapping audit complete: checked=${checked}, skipped_non_parsed=${skipped}, failed=${failed}`);
   for (const message of examples) console.log(`  - ${message}`);
   if (failed) process.exitCode = 1;
 }

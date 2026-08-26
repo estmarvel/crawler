@@ -4,7 +4,7 @@ set -uo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OUTPUT_DIR="${ROOT_DIR}/new_output"
-ALL_SITES=(sxjm sxzwfw bitbid huaxin jiubang qianji sxjkzcpt trade365 sxbid)
+ALL_SITES=(sxjm sxzwfw bitbid huaxin jiubang qianji sxjkzcpt trade365 sxbid sxxindian runshihua gxebidding)
 
 WATCH_INTERVAL=0
 SELECTED_SITE=""

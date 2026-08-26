@@ -7,7 +7,7 @@ OUTPUT_DIR="${ROOT_DIR}/new_output"
 CONTROL_DIR="${OUTPUT_DIR}/control"
 LOG_FILE="${CONTROL_DIR}/stop_at_cooldown.log"
 LOCK_FILE="${CONTROL_DIR}/stop_at_cooldown.lock"
-KNOWN_SITES=(sxjm sxzwfw bitbid huaxin jiubang qianji sxjkzcpt trade365 sxbid)
+KNOWN_SITES=(sxjm sxzwfw bitbid huaxin jiubang qianji sxjkzcpt trade365 sxbid runshihua gxebidding)
 
 mkdir -p "$CONTROL_DIR"
 

@@ -200,7 +200,7 @@ class SxzwfwGovernmentProcurementParserTest(unittest.TestCase):
 
         self.assertEqual((parsed.subtype, parsed.notice_type), ("gzjg", "更正结果公示"))
         self.assertEqual(parsed.data["项目名称"], "某单位物业服务项目")
-        self.assertIn("更正（政府采购更正公告,channelId=19）", parsed.data["公共类型"])
+        self.assertEqual(parsed.data["公共类型"], "更正公告")
         self.assertEqual(parsed.data["开标时间"], datetime(2026, 7, 20, 9, 30))
         self.assertEqual(parsed.data["招标人地址"], "太原市甲路1号")
         self.assertEqual(parsed.data["招标人联系方式"], "0351-1111111")
@@ -209,6 +209,34 @@ class SxzwfwGovernmentProcurementParserTest(unittest.TestCase):
         self.assertEqual(parsed.data["招标代理机构联系人"], "张某")
         self.assertEqual(parsed.data["招标代理机构联系方式"], "0351-2222222")
         self.assertIn("响应文件提交截止时间", parsed.data["公告内容"])
+        self.assertNotIn("其他补充事宜", parsed.data["公告内容"])
+        self.assertNotIn("某采购单位", parsed.data["公告内容"])
+        self.assertNotIn("项目联系方式", parsed.data["公告内容"])
+
+    def test_termination_reason_does_not_swallow_contact_sections(self):
+        page = """
+        <html><body>
+          <p class="cs_title_P1">某设备采购项目废标公告</p>
+          <div class="cs_xq_content">
+            <p>一、项目基本情况</p><p>采购项目名称：某设备采购项目</p>
+            <p>二、项目终止的原因</p><p>通过符合性审查的供应商不足三家。</p>
+            <p>三、评审小组成员名单</p><p>张某、李某、王某</p>
+            <p>四、其他补充事项</p><p>无</p>
+            <p>五、凡对本次公告内容提出询问，请按以下方式联系</p>
+            <p>采购人：某采购单位</p><p>电话：0351-1234567</p>
+          </div>
+        </body></html>
+        """.encode("utf-8")
+
+        parsed = SxzwfwGovernmentProcurementParser.parse(
+            "zc_gz", page, {"notice_id": "termination-1"},
+            "https://prec.sxzwfw.gov.cn/jyxxzcgz/termination-1.jhtml",
+        )
+
+        self.assertEqual(parsed.data["公告内容"], "通过符合性审查的供应商不足三家。")
+        self.assertNotIn("评审小组", parsed.data["公告内容"])
+        self.assertNotIn("其他补充事项", parsed.data["公告内容"])
+        self.assertNotIn("某采购单位", parsed.data["公告内容"])
 
     def test_correction_table_uses_the_last_changed_opening_time(self):
         page = correction_html().replace(

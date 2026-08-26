@@ -231,12 +231,12 @@ publish_time_format -> publish_time -> created_at_format -> created_at
 
 ### 7.1 原始内容
 
-解密后的详情对象会与列表记录组合用于解析，但溯源时分别保存，避免覆盖源值：
+解密后的详情对象会与列表记录组合用于解析，并保存到独立 payload 快照：
 
 ```text
-_trace.payload.list      解密后的列表记录
-_trace.payload.detail    解密后的详情对象
-_trace.payload.transport 列表请求、分页和详情业务信封上下文
+payloads/...json -> list    解密后的列表记录
+payloads/...json -> detail  解密后的详情对象
+_trace.responseMetadata     列表请求、分页和详情业务信封上下文
 ```
 
 详情对象的 `content` 是公告原始 HTML：
@@ -369,12 +369,11 @@ new_output/sxjm/snapshots/<公共Schema输出目录>/<公告ID>_<SHA256前12位>
 路径是相对于 `new_output` 的路径。相同公告 ID、相同 HTML 内容会得到相同文件名，
 已存在时不会重复写入。
 
-快照采用 SHA-256，分别写入：
+快照采用 SHA-256，写入：
 
 - 顶层 `HTML快照路径`；
 - 顶层 `HTML快照SHA256`；
-- `_trace.exportMetadata.snapshotPath`；
-- `_trace.exportMetadata.snapshotSha256`。
+- `_trace.payloadSnapshot.path/sha256`（原始接口载荷快照）。
 
 ### 9.2 JSON 溯源包
 
@@ -382,19 +381,18 @@ new_output/sxjm/snapshots/<公共Schema输出目录>/<公告ID>_<SHA256前12位>
 
 | 字段 | 内容与数据库去向 |
 |---|---|
-| `payload` | 原始列表、详情和传输上下文；对应 MongoDB `raw_notices.payload` |
-| `rawHtml` | 原始 HTML；对应 MongoDB `raw_notices.rawHtml` |
-| `rawText` | 清洗正文；对应 MongoDB `raw_notices.rawText` |
+| `payloadSnapshot` | 原始列表和详情载荷快照的路径、SHA256；导入后对应 MongoDB `raw_notices.payload` |
 | `responseMetadata` | 列表/详情 HTTP 状态、请求上下文和业务信封 |
 | `fieldMeta` | 频道、栏目、源站类型、Schema 类型及解析器版本 |
-| `exportMetadata` | 公告公共元数据、快照路径、缺失字段和附件清单 |
-| `integrity` | 内容指纹以及 payload、HTML、正文的 SHA-256 |
+| `crawlerVersion` | 采集程序版本 |
+| `extractionVersion` | 字段抽取规则版本 |
+| `integrity` | 顶层正文的 SHA-256 |
 
-快照文件用于采集机本地复核，`_trace.rawHtml` 使数据库即使脱离本地文件也能保留
-同一份 HTML。现有数据库结构无需修改。
+快照文件用于采集机本地复核；导入器校验 SHA-256 后把原始 HTML、payload 和正文写入
+MongoDB，因此 JSON 不再重复内嵌同一份大文本。现有数据库结构无需修改。
 
 若源站极少数记录没有 `content`，快照 Pipeline 会告警但不会丢弃公告；解密后的
-详情 JSON 仍保存在 `_trace.payload.detail`。
+详情 JSON 仍保存在独立 payload 快照中。
 
 ## 10. 输出文件和目录
 
@@ -518,7 +516,6 @@ sxjm/attachments/<公告类型>/<公告ID>/<source_file_id>_<file_name>
 回写位置包括：
 
 - 顶层 `附件`；
-- `_trace.exportMetadata.attachments`；
 - 同名 CSV 的 `附件` 列。
 
 ### 13.3 超时和重试
@@ -719,8 +716,8 @@ SXJM 专用审计以“每个 feed 抓取固定条数”的测试任务为目标
 
 - 16 个 feed 的记录数；
 - `notice_subtype`、源站类型、Schema 和导出编码是否一致；
-- 公告正文是否与 `_trace.rawText` 一致；
-- `_trace.rawHtml` 和原始详情是否存在；
+- 公告正文是否存在且哈希可复核；
+- HTML 快照和原始 payload 快照是否存在、SHA256 是否一致；
 - 候选人、中标人或成交人是否能在正文中复核；
 - 附件名称和 URL 是否完整；
 - 各 feed 的正文长度和缺失字段统计。
@@ -794,7 +791,7 @@ direct_access_blocked
 
 空 HTML 不会导致公告丢失。应检查：
 
-- `_trace.payload.detail` 是否包含结构化字段；
+- payload 快照中的 `detail` 是否包含结构化字段；
 - 附件中是否包含完整公告 PDF；
 - 日志中的“无法保存 HTML 快照”告警。
 

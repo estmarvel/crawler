@@ -33,9 +33,9 @@ function printHelp() {
 
 Options:
   --commit                 Write extraction details to MongoDB and indexes to MySQL.
-  --site=<site>            all, sxjm, sxzwfw, bitbid, huaxin, or jiubang.
+  --site=<site>            all or any configured crawler site.
   --output-root=<path>     Crawler output root.
-  --api-root=<path>        Project recommendation API directory.
+  --env-file=<path>        crawler_prisma environment file (default: .env).
   --help                   Show this help.
 
 Run import_raw_notices.js first. Existing project_notice and verification links
@@ -52,13 +52,17 @@ function buildExtractedFields(source) {
 function buildEvidence(row) {
   const existing = row.trace?.fieldMeta?.evidence;
   const evidence = Array.isArray(existing) ? [...existing] : [];
+  const fieldMeta = { ...(row.trace?.fieldMeta || {}) };
+  delete fieldMeta.evidence;
+  delete fieldMeta.fieldConfidences;
+  delete fieldMeta._dedup;
   evidence.push({
     type: "CRAWLER_DIAGNOSTICS",
     noticeSubtype: nullableString(row.source["公告子类型"]),
     missingFields: Array.isArray(row.source["缺失字段"])
       ? row.source["缺失字段"]
       : [],
-    fieldMeta: row.trace?.fieldMeta || {},
+    fieldMeta,
   });
   return evidence;
 }
@@ -185,9 +189,9 @@ async function main() {
   console.log(`Mode: ${options.commit ? "COMMIT" : "DRY RUN (no storage writes)"}`);
   console.log(`Validated JSON files: ${jsonNoticeFiles(options.outputRoot, options.sites).length}`);
   const typeCounts = new Map();
-    const identities = new Map();
+  const identities = new Map();
   let duplicateCount = 0;
-  const stores = options.commit ? await openStores(options.apiRoot, { mongo: true }) : null;
+  const stores = options.commit ? await openStores(options.envFile, { mongo: true }) : null;
   try {
     const dataSources = stores ? await resolveDataSources(stores.prisma, options.sites) : null;
     const parentCache = new Map();
@@ -196,17 +200,20 @@ async function main() {
     for await (const record of iterateJsonNotices(options.outputRoot, options.sites)) {
       const row = mapRecord(record);
       const identity = `${row.site}\u0000${row.sourceNoticeId}\u0000${row.extractionModel}\u0000${row.extractionVersion}`;
-      if (identities.has(identity)) {
+      const digest = recordDigest(row);
+      const previous = identities.get(identity);
+      if (previous) {
         duplicateCount += 1;
-        if (recordDigest(identities.get(identity)) !== recordDigest(row)) {
+        if (previous.digest !== digest) {
           throw new Error(
             `${row.context}: conflicting duplicate extraction for 公告ID=${row.sourceNoticeId}; `
-            + `first seen at ${identities.get(identity).context}`,
+            + `first seen at ${previous.context}`,
           );
         }
         continue;
       } else {
-        identities.set(identity, row);
+        // 不长期保存完整 source/trace；旧输出可能在 trace 中内嵌 HTML。
+        identities.set(identity, { digest, context: row.context });
         typeCounts.set(row.noticeType, (typeCounts.get(row.noticeType) || 0) + 1);
       }
       if (stores) {

@@ -18,6 +18,10 @@ from crawler_scrapy.schemas.notice_fields import (
     get_notice_fields,
 )
 from crawler_scrapy.sites.sxjkzcpt.parser import SxjkzcptParser
+from crawler_scrapy.storage.source_snapshots import (
+    load_record_html,
+    load_record_payload,
+)
 
 
 def _atomic_json(path: Path, rows: list[dict[str, Any]]) -> None:
@@ -65,8 +69,8 @@ def reparse(output_root: Path) -> int:
             raise ValueError(f"JSON不是数组：{path}")
         for row in rows:
             trace = row.get("_trace") if isinstance(row, dict) else None
-            payload = trace.get("payload") if isinstance(trace, dict) else None
-            raw_html = trace.get("rawHtml") if isinstance(trace, dict) else None
+            payload = load_record_payload(row, output_root)
+            raw_html = load_record_html(row, output_root)
             feed = payload.get("sourceFeed") if isinstance(payload, dict) else None
             list_record = payload.get("list") if isinstance(payload, dict) else None
             if not raw_html or not feed:
@@ -83,9 +87,6 @@ def reparse(output_root: Path) -> int:
             row["抽取版本"] = SxjkzcptParser.parser_version
             trace["crawlerVersion"] = SxjkzcptParser.parser_version
             trace["extractionVersion"] = SxjkzcptParser.parser_version
-            export = trace.get("exportMetadata")
-            if isinstance(export, dict):
-                export["missingFields"] = list(row["缺失字段"])
             field_meta = trace.get("fieldMeta")
             if isinstance(field_meta, dict):
                 field_meta["snapshotReparsedWith"] = SxjkzcptParser.parser_version

@@ -145,7 +145,8 @@ def _label_value(text: str, labels: Iterable[str]) -> str:
         for label in labels:
             match = re.search(
                 rf"(?:^|\s)(?:(?:\d+(?:\.\d+)*[、.．]?|[（(]\d+[）)])\s*)?"
-                rf"{_flexible_label(label)}\s*[：:]\s*(.+)$",
+                rf"{_flexible_label(label)}"
+                rf"(?:\s*[（(][^）)\n]{{0,40}}[）)])?\s*[：:]\s*(.+)$",
                 line,
             )
             if match:
@@ -291,16 +292,54 @@ def _source_nature(section: str, title: str, text: str = "") -> str:
     return f"{nature}（{channel_name},channelId={channel_id}）"
 
 
+def _correction_public_type(title: str, text: str = "") -> str:
+    """按字段标准输出更正类子类型，不混入栏目诊断信息。"""
+
+    compact = re.sub(r"\s+", "", f"{title}\n{text[:1000]}")
+    if re.search(
+        r"(?:有效)?(?:投标人|投标单位|供应商)(?:数量)?不足[三3]家",
+        compact,
+    ):
+        return "废标公告"
+    for keyword, public_type in (
+        ("废标", "废标公告"),
+        ("流标", "流标公告"),
+        ("招标失败", "废标公告"),
+        ("撤销", "撤销公告"),
+        ("终止", "终止公告"),
+        ("暂停", "终止公告"),
+        ("延期", "延期公告"),
+        ("澄清", "澄清公告"),
+        ("答疑", "澄清公告"),
+        ("重新招标", "重新招标公告"),
+        ("变更", "变更公告"),
+        ("更正", "更正公告"),
+        ("招标控制价", "变更公告"),
+        ("最高投标限价", "变更公告"),
+        ("最高限价", "变更公告"),
+    ):
+        if keyword in compact:
+            return public_type
+    return "其他"
+
+
 def _clean_project_name(title: str) -> str:
     value = _space(title)
     suffixes = (
+        "重新招标控制价", "二次招标控制价", "三次招标控制价",
+        "招标变更公告", "招标补充公告", "二次延期公告", "三次延期公告",
+        "二次招标公告", "三次招标公告", "流标公告", "招标失败公告",
+        "评标报告",
         "更正中标结果公示", "撤销中标结果公示", "中标结果公示",
         "更正中标候选人公示", "撤销中标候选人公示", "中标候选人公示",
         "定标候选人公示", "资格预审公告", "资审公告", "招标计划变更公告",
         "招标计划", "招标公告撤销公告", "招标撤销公告", "重新招标公告",
         "招标公告", "更正公告", "变更公告", "澄清公告", "延期公告",
-        "终止公告", "废标公告", "撤销公告", "招标控制价变更", "招标控制价",
-        "最高投标限价", "最高限价", "合同公告", "履约公告",
+        "终止公告", "废标公告", "撤销公告", "招标暂停/终止公告",
+        "招标撤销（终止）公告", "招标撤销(终止)公告",
+        "招标控制价变更公示", "招标控制价变更", "招标控制价公示", "招标控制价",
+        "最高投标限价公示", "最高投标限价", "最高限价公示", "最高限价",
+        "合同公告", "履约公告",
         "评标结果公示", "成交结果公告", "中标公告", "结果公告",
     )
     previous = None
@@ -317,38 +356,92 @@ def _clean_project_name(title: str) -> str:
 def _detect_type(section: str, title: str, text: str = "") -> tuple[str, str]:
     compact = re.sub(r"\s+", "", title)
     compact_text = re.sub(r"\s+", "", text)
-    correction = any(word in compact for word in ("更正", "变更", "撤销", "澄清"))
-    if "合同" in compact or "履约" in compact:
-        return "htly", "合同与履约"
+    # 栏目优先，避免把“合同段/合同包”误判成合同公告。
     if section == "zbjh" or "招标计划" in compact:
         return "zbjh", "招标计划"
+    if re.search(
+        r"(?:合同(?:公告|公示|签订|履约|备案)|履约(?:公告|公示|验收))",
+        compact,
+    ):
+        return "htly", "合同与履约"
+    insufficient_bidders = bool(re.search(
+        r"(?:有效)?(?:投标人|投标单位|供应商)(?:数量)?不足[三3]家",
+        compact_text,
+    ))
+    correction = section == "bg" or any(
+        word in compact
+        for word in (
+            "更正", "变更", "撤销", "澄清", "答疑", "延期", "终止",
+            "暂停", "废标", "流标", "招标失败", "重新招标",
+            "招标控制价", "最高投标限价", "最高限价",
+        )
+    ) or (section == "qt" and insufficient_bidders)
+    if correction:
+        return "gzjg", "更正结果公示"
     if "定标候选人" in compact:
         return "dbhxr", "定标候选人公示"
     if "中标候选人" in compact:
         return "hxr", "中标候选人公示"
     if "中标结果" in compact or re.search(r"中标人(?:信息)?", compact):
-        return ("gzjg", "更正结果公示") if correction else ("zbjg", "中标结果公示")
+        return "zbjg", "中标结果公示"
     if "资格预审" in compact or "资审公告" in compact:
         return "zbys", "资格预审公告"
-    # 公共字段框架没有独立的终止公告 Schema。业务字段沿用招标公告，真实
-    # 生命周期通过 zzgg 子类型保留，导出层再把公告编码写成 TERMINATION。
-    insufficient_bidders = bool(re.search(
-        r"(?:有效)?(?:投标人|投标单位|供应商)(?:数量)?不足[三3]家",
-        compact_text,
-    ))
-    if any(
-        word in compact for word in ("终止", "废标", "流标", "招标失败", "撤销")
-    ) or (section == "qt" and insufficient_bidders):
-        return "zzgg", "招标公告"
     # 标题偶有省略“中标候选人/中标结果”等固定后缀，栏目 channelId 是比标题
     # 关键词更稳定的分类依据；先完成特殊类型识别，再使用栏目兜底。
     if section == "hxr":
         return "hxr", "中标候选人公示"
     if section == "gs":
-        return ("gzjg", "更正结果公示") if correction else ("zbjg", "中标结果公示")
-    # 更正/其他栏目没有独立的通用 Schema。无法识别原大类时归入招标公告，并通过
-    # “源站公告性质”和 notice_subtype 保留变更、终止、废标等原始语义。
+        return "zbjg", "中标结果公示"
     return "zbgg", "招标公告"
+
+
+def _correction_content(text: str) -> str:
+    """保留更正/终止事项，排除网页头、联系方式和签章占位。"""
+
+    lines = [line.strip() for line in str(text or "").splitlines() if line.strip()]
+    if not lines:
+        return ""
+
+    # 政府采购模板优先从“更正信息”保留更正事项和新旧值；废标/终止模板
+    # 优先从真实原因开始，避免把项目基本情况和评审名单整段写入公告内容。
+    start_groups = (
+        ("更正信息",),
+        ("项目终止的原因", "终止原因", "废标理由", "废标原因", "流标原因", "招标失败原因"),
+        ("内容", "变更内容", "更正内容", "澄清内容", "答疑内容", "终止内容"),
+        ("异常情况描述", "控制价内容", "最高投标限价内容"),
+    )
+    start_index = 0
+    first_value = ""
+    found = False
+    for labels in start_groups:
+        label_pattern = "|".join(re.escape(label) for label in labels)
+        for index, line in enumerate(lines):
+            match = re.match(
+                r"^(?:[一二三四五六七八九十百\d]+[、.．]\s*)?"
+                rf"(?:{label_pattern})\s*[：:]?\s*(?P<value>.*)$",
+                line,
+            )
+            if match:
+                start_index = index + 1
+                first_value = match.group("value").strip()
+                found = True
+                break
+        if found:
+            break
+
+    selected = [first_value] if first_value else []
+    end_pattern = re.compile(
+        r"^(?:[一二三四五六七八九十百\d]+[、.．]\s*)?"
+        r"(?:其他补充(?:事宜|事项)|其它事项|评审小组成员名单|评审专家名单|"
+        r"提出异议的渠道和方式|监督部门|监督单位|"
+        r"联系方式|联系人及联系方式|对本次采购提出询问.*|"
+        r"凡对本次公告内容提出询问.*|公告期限)\s*[：:]?\s*$"
+    )
+    for line in lines[start_index:]:
+        if end_pattern.match(line) or line.startswith("招标人或其招标代理机构"):
+            break
+        selected.append(line)
+    return "\n".join(selected).strip()
 
 
 def _normalize_contact_line(line: str) -> str:
@@ -359,24 +452,43 @@ def _normalize_contact_line(line: str) -> str:
         (r"采\s*购\s*人", "采购人"),
         (r"建\s*设\s*单\s*位", "招标人"),
         (r"项\s*目\s*单\s*位", "招标人"),
+        (r"联\s*系\s*人\s*电\s*话", "联系电话"),
         (r"详\s*细\s*地\s*址", "详细地址"),
         (r"联\s*系\s*地\s*址", "详细地址"),
-        (r"地\s*址", "地址"),
+        (r"地\s*址|址", "地址"),
         (r"联\s*系\s*人", "联系人"),
-        (r"联\s*系\s*人\s*电\s*话", "联系电话"),
         (r"联\s*系\s*电\s*话", "联系电话"),
-        (r"电\s*话", "电话"),
+        (r"电\s*话|话", "电话"),
         (r"联\s*系\s*方\s*式", "联系方式"),
+        (r"电\s*子\s*邮\s*箱|邮\s*箱|箱", "邮箱"),
     )
     for pattern, label in patterns:
-        match = re.match(rf"^\s*{pattern}\s*[：:]\s*(.*)$", line)
+        # pattern 中部分标签带有“|”；必须整体分组，否则正则优先级会让
+        # “电\s*话”分支只匹配到标签，冒号后的号码会被静默丢弃。
+        match = re.match(rf"^\s*(?:{pattern})\s*[：:]\s*(.*)$", line)
         if match:
             return f"{label}：{_space(match.group(1))}"
     return _space(line)
 
 
 def _contact_section(text: str) -> list[str]:
-    lines = [_normalize_contact_line(line) for line in text.splitlines() if _space(line)]
+    lines: list[str] = []
+    for raw_line in text.splitlines():
+        if not _space(raw_line):
+            continue
+        # PDF视觉文本可能把“联系人：张三 电话：...”放在同一行；先拆成
+        # 独立标签行，防止电话号码和邮箱被并入联系人姓名。
+        expanded = re.sub(
+            r"(?<=\S)\s+(?=(?:地\s*址|电\s*话|联\s*系\s*电\s*话|"
+            r"邮\s*箱|电\s*子\s*邮\s*箱)\s*[：:])",
+            "\n",
+            raw_line,
+        )
+        lines.extend(
+            _normalize_contact_line(part)
+            for part in expanded.splitlines()
+            if _space(part)
+        )
     headings = [
         index
         for index, line in enumerate(lines)
@@ -413,7 +525,16 @@ def _block_value(block: list[str], labels: Iterable[str]) -> str:
         for label in labels:
             match = re.match(rf"^{re.escape(label)}：\s*(.*)$", line)
             if match:
-                values = [_space(match.group(1)).strip("；;。")]
+                first = _space(match.group(1)).strip("；;。")
+                if label == "联系人":
+                    # “刘宁 地 电 邮 话：...”是PDF列错位后的常见形态。
+                    # 联系人字段只接受姓名，电话和邮箱由各自字段解析。
+                    return re.split(
+                        r"\s+(?:地|电|邮)(?:\s|$)|\s+(?:地址|电话|邮箱)\s*[：:]",
+                        first,
+                        maxsplit=1,
+                    )[0].strip()
+                values = [first]
                 for following in block[index + 1 :]:
                     if boundary.match(following) or "招标人或其招标代理机构" in following:
                         break
@@ -635,15 +756,49 @@ def _time_range(text: str, labels: Iterable[str]) -> str:
 
 
 def _monetary_label_paragraph(text: str, labels: Iterable[str]) -> str:
-    """优先保留标签后的总额，避免金额标准化误取括号内最后一个分标段值。"""
+    """只在公告能确定唯一项目总额时返回金额。
+
+    多标段公告经常逐段重复“招标金额”，任取第一笔或最后一笔都会把标段金额
+    错写成项目总额。明确带“总价/本次”的总额优先；否则存在多个不同金额时
+    留空，分标段金额仍完整保留在正文和招标范围中。
+    """
 
     label_values = tuple(labels)
     label_pattern = "|".join(
         re.escape(label) for label in sorted(label_values, key=len, reverse=True)
     )
+    amount_pattern = r"[\d,，]+(?:\.\d+)?\s*(?:亿元|万元|元)"
+    explicit_total_labels = tuple(
+        label
+        for label in label_values
+        if any(marker in label for marker in ("总价", "总额", "本次", "财政审定"))
+    )
+    if explicit_total_labels:
+        explicit_pattern = "|".join(
+            re.escape(label)
+            for label in sorted(explicit_total_labels, key=len, reverse=True)
+        )
+        explicit_values = {
+            _space(value).replace("，", ",")
+            for value in re.findall(
+                rf"(?:{explicit_pattern})\s*(?:约|为)?\s*[：:]?\s*({amount_pattern})",
+                text,
+            )
+        }
+        if len(explicit_values) == 1:
+            return explicit_values.pop()
+    labelled_values = {
+        _space(value).replace("，", ",")
+        for value in re.findall(
+            rf"(?:{label_pattern})\s*(?:约|为)?\s*[：:]?\s*({amount_pattern})",
+            text,
+        )
+    }
+    if len(labelled_values) > 1:
+        return ""
     direct = re.search(
         rf"(?:{label_pattern})\s*(?:约|为)?\s*[：:]?\s*"
-        r"([\d,，]+(?:\.\d+)?\s*(?:亿元|万元|元))",
+        rf"({amount_pattern})",
         text,
     )
     if direct:
@@ -678,6 +833,28 @@ def _datetime_label_value(text: str, labels: Iterable[str]) -> str:
         f"{int(year):04d}-{int(month):02d}-{int(day):02d} "
         f"{int(hour):02d}:{int(minute):02d}{suffix}"
     )
+
+
+def _corrected_datetime(text: str, labels: Iterable[str]) -> str:
+    """取正文最后一个有标签的时间，避免把更正前时间当最终值。"""
+
+    values: list[tuple[int, str]] = []
+    datetime_pattern = (
+        r"(\d{4}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*日\s*"
+        r"\d{1,2}\s*(?:时|[：:])\s*\d{1,2}(?:\s*分)?(?:\s*[：:]\s*\d{1,2})?|"
+        r"\d{4}[-/.]\d{1,2}[-/.]\d{1,2}\s+\d{1,2}[：:]\d{1,2}(?::\d{1,2})?)"
+    )
+    for label in labels:
+        pattern = rf"{_flexible_label(label)}\s*[：:]\s*{datetime_pattern}"
+        for match in re.finditer(pattern, text):
+            value = _space(match.group(1)).replace("：", ":")
+            value = value.replace("年", "-").replace("月", "-").replace("日", " ")
+            value = value.replace("时", ":").replace("分", "")
+            value = re.sub(r"\s*([-:])\s*", r"\1", value)
+            values.append((match.start(), _space(value)))
+    if values:
+        return max(values, key=lambda item: item[0])[1]
+    return _datetime_label_value(text, labels)
 
 
 def _approval(text: str) -> tuple[str, str]:
@@ -878,7 +1055,83 @@ def _candidate_visual_details(text: str) -> list[dict[str, Any]]:
     ]
 
 
-def _award_result_details(text: str) -> list[dict[str, Any]]:
+def _award_result_table_details(document) -> tuple[list[dict[str, Any]], list[str]]:
+    """按 HTML 表格列关系提取结果和联合体成员。
+
+    SXZWFW 的结果表会把“牵头人/成员”放在同一个中标人单元格内。扁平化
+    文本会丢失它与右侧中标价的对应关系，因此优先直接读取表格。
+    """
+
+    for table in document.xpath(".//table[not(.//table)]"):
+        rows = [
+            [_space("".join(cell.itertext())) for cell in row.xpath("./th|./td")]
+            for row in table.xpath(".//tr")
+        ]
+        rows = [row for row in rows if row]
+        header_index = next(
+            (
+                index
+                for index, row in enumerate(rows)
+                if any("中标人" in cell for cell in row)
+                and any(any(word in cell for word in ("中标价", "中标金额", "报价")) for cell in row)
+            ),
+            -1,
+        )
+        if header_index < 0:
+            continue
+        header = rows[header_index]
+        name_index = next(i for i, cell in enumerate(header) if "中标人" in cell)
+        price_index = next(
+            i
+            for i, cell in enumerate(header)
+            if any(word in cell for word in ("中标价", "中标金额", "报价"))
+        )
+        section_index = next(
+            (i for i, cell in enumerate(header) if cell in {"标段", "标包", "包号"}),
+            -1,
+        )
+        details: list[dict[str, Any]] = []
+        members: list[str] = []
+        for row in rows[header_index + 1 :]:
+            if max(name_index, price_index) >= len(row):
+                continue
+            name_cell = row[name_index].strip()
+            if not name_cell or name_cell in {"中标人", "中标人名称"}:
+                continue
+            lead_match = re.search(
+                r"(?:联合体)?牵头人(?:单位名称)?\s*[：:]\s*(.+?)"
+                r"(?=(?:联合体成员|联合体单位名称|成员)\s*[：:]|$)",
+                name_cell,
+            )
+            member_matches = re.findall(
+                r"(?:联合体成员|联合体单位名称|成员)\s*[：:]\s*(.+?)"
+                r"(?=(?:联合体成员|联合体单位名称|成员)\s*[：:]|$)",
+                name_cell,
+            )
+            if lead_match:
+                winner = lead_match.group(1).strip("；;，,。 ")
+            else:
+                winner = re.sub(r"^中标人(?:名称)?\s*[：:]\s*", "", name_cell)
+                winner = winner.strip("；;，,。 ")
+            row_members = [
+                item.strip("；;，,。 ") for item in member_matches if item.strip("；;，,。 ")
+            ]
+            members.extend(row_members)
+            price_text = row[price_index].strip("；;，,。 ")
+            price = coerce_decimal_amount(price_text)
+            details.append(
+                {
+                    "标段": row[section_index] if 0 <= section_index < len(row) else "",
+                    "中标人名称": winner,
+                    "中标价": price if price is not None else (price_text or None),
+                }
+            )
+        if details:
+            return details, list(dict.fromkeys(members))
+    return [], []
+
+
+def _award_result_details(document, text: str) -> tuple[list[dict[str, Any]], list[str]]:
     """提取 SXZWFW 结果公示中的“标段—中标人—中标价”。
 
     源站正文既有标准“中标人：”行，也有由 ``&nbsp;`` 排成“中 标 人”的
@@ -886,8 +1139,20 @@ def _award_result_details(text: str) -> list[dict[str, Any]]:
     先处理标准模板；这里仅补齐该站的空格标签和叙述模板，不猜测未公布价格。
     """
 
+    table_details, table_members = _award_result_table_details(document)
+    if table_details:
+        return table_details, table_members
+
     standard = award_details({}, text)
     result: list[dict[str, Any]] = []
+    consortium = [
+        match.strip("；;，,。 ")
+        for match in re.findall(
+            r"(?m)^\s*(?:联合体成员|联合体单位名称|成员)\s*[：:]\s*([^\n]+)",
+            text,
+        )
+        if match.strip("；;，,。 ")
+    ]
     section = ""
     lines = [_space(raw_line) for raw_line in text.splitlines() if _space(raw_line)]
     section_pattern = re.compile(
@@ -916,6 +1181,9 @@ def _award_result_details(text: str) -> list[dict[str, Any]]:
             continue
         if match := name_pattern.match(line):
             name = _space(match.group(1)).strip("；;，,。")
+            name = re.sub(
+                r"^(?:联合体)?牵头人(?:单位名称)?\s*[：:]\s*", "", name
+            ).strip()
             if name and name not in {"信息", "情况"}:
                 result.append({"标段": section, "中标人名称": name, "中标价": None})
         if match := price_pattern.search(line):
@@ -931,10 +1199,16 @@ def _award_result_details(text: str) -> list[dict[str, Any]]:
                 result[-1]["中标价"] = amount if amount is not None else (value or None)
 
     if result:
-        return result
+        return result, list(dict.fromkeys(consortium))
 
     if standard:
-        return standard
+        for row in standard:
+            row["中标人名称"] = re.sub(
+                r"^(?:联合体)?牵头人(?:单位名称)?\s*[：:]\s*",
+                "",
+                str(row.get("中标人名称") or ""),
+            ).strip()
+        return standard, list(dict.fromkeys(consortium))
 
     # 部分结果公告只在叙述句中公布中标人，随后单独给出投标报价。
     narrative = re.search(
@@ -942,7 +1216,7 @@ def _award_result_details(text: str) -> list[dict[str, Any]]:
         text,
     )
     if not narrative:
-        return []
+        return [], []
     name = _space(narrative.group(1)).strip("，,；;。")
     price = _label_value(text, ("投标报价", "中标价", "中标价格", "中标金额"))
     amount = coerce_decimal_amount(price)
@@ -952,7 +1226,7 @@ def _award_result_details(text: str) -> list[dict[str, Any]]:
             "中标人名称": name,
             "中标价": amount if amount is not None else (price or None),
         }
-    ]
+    ], []
 
 
 def _direct_attachments(document, detail_url: str) -> list[dict[str, Any]]:
@@ -960,12 +1234,32 @@ def _direct_attachments(document, detail_url: str) -> list[dict[str, Any]]:
     root = content[0] if content else document
     result: list[dict[str, Any]] = []
     seen: set[str] = set()
-    for anchor in root.cssselect("a[href]"):
-        href = _string(anchor.get("href"))
-        name = _space("".join(anchor.itertext()))
+    # 部分工程建设公告不在 HTML 中放正文，而是用 iframe/embed/
+    # object 嵌入一份 PDF。它们是公告正文而不只是普通附件，
+    # 必须与链接附件一样进入下载和正文解析链路。
+    for element in root.cssselect("a[href], iframe[src], embed[src], object[data]"):
+        tag = str(getattr(element, "tag", "") or "").lower()
+        attribute = "href" if tag == "a" else "data" if tag == "object" else "src"
+        href = _string(element.get(attribute))
+        name = _space("".join(element.itertext()))
+        is_notice_body = tag in {"iframe", "embed", "object"}
         if not href or href.lower().startswith(("javascript:", "mailto:")):
             continue
-        url = urljoin(detail_url, href)
+        # 部分市级正文 PDF 使用 Windows 路径分隔符，例如
+        # ``http://host:25006\upload\wj\notice.pdf``。urllib 会把端口后的
+        # ``\upload`` 一并当作 netloc，Scrapy 创建 Request 时因端口非法而
+        # 抛异常。先统一路径分隔符，再校验最终 URL，坏链接只跳过附件，不能
+        # 让整条公告丢失。
+        normalized_href = unescape(href).replace("\\", "/").strip()
+        try:
+            url = urljoin(detail_url, normalized_href)
+            parsed_url = urlsplit(url)
+            # 访问 port 会主动验证 ``host:port``，非法端口在这里被隔离。
+            _ = parsed_url.port
+        except ValueError:
+            continue
+        if parsed_url.scheme.lower() not in {"http", "https"} or not parsed_url.hostname:
+            continue
         if not (FILE_SUFFIX_RE.search(url) or "/attachment.jspx" in url):
             continue
         if url in seen:
@@ -982,6 +1276,7 @@ def _direct_attachments(document, detail_url: str) -> list[dict[str, Any]]:
                 "file_size_bytes": None,
                 "file_type": "application/pdf" if ".pdf" in url.lower() else None,
                 "parse_status": "URL_RESOLVED",
+                "is_notice_body": is_notice_body,
             }
         )
     return result
@@ -1026,7 +1321,7 @@ def _cms_attachment(html_text: str, document, fallback_id: str) -> tuple[dict[st
 class SxzwfwParser:
     """把列表元数据和详情 HTML 转换为框架八类公告字段。"""
 
-    parser_version = "sxzwfw-v8-field-boundaries"
+    parser_version = "sxzwfw-v11-embedded-pdf-body"
 
     @classmethod
     def parse_list_records(cls, html_value: bytes | str) -> list[dict[str, str]]:
@@ -1074,9 +1369,15 @@ class SxzwfwParser:
         html_value: bytes | str,
         list_record: Mapping[str, Any],
         detail_url: str,
+        supplemental_text: str = "",
     ) -> ParsedNotice:
         document = _parse_document(html_value)
         raw_text = visible_content_text(html_value)
+        supplemental = str(supplemental_text or "").strip()
+        if supplemental:
+            raw_text = "\n".join(
+                value for value in (raw_text.strip(), supplemental) if value
+            )
         title = _first_text(document, ".cs_title_P1") or _string(list_record.get("title"))
         header = _first_text(document, ".cs_title_P3")
         publish_match = re.search(r"发布日期\s*[：:]\s*([0-9]{4}[-/.年][0-9]{1,2}[-/.月][0-9]{1,2}(?:日)?(?:\s+[0-9]{1,2}:[0-9]{2}(?::[0-9]{2})?)?)", header)
@@ -1131,7 +1432,7 @@ class SxzwfwParser:
                 if field not in data:
                     continue
                 data[field] = next((table[label] for label in labels if table.get(label)), "") or _label_value(text, labels)
-        elif subtype in {"zbgg", "zbys", "zzgg"}:
+        elif subtype in {"zbgg", "zbys"}:
             prequalification = subtype == "zbys"
             data["开标时间"] = _datetime_label_value(text, ("开标时间", "开启时间"))
             data["项目编号/招标编号"] = _project_numbers(text)
@@ -1154,8 +1455,13 @@ class SxzwfwParser:
                 )
                 funding = match.group(1).strip() if match else ""
             data["资金来源"] = funding
-            body_location = _label_value(text, ("招标项目所在地区", "项目所在地区", "项目地点", "建设地点"))
-            data["项目地点"] = _join_distinct(body_location, list_record.get("location"))
+            # 明确的建设/履约地点优先；“项目所在地区”和列表交易场所仅在
+            # 正文未给地点时兜底，不能拼出“尧都区|临汾市”这类冗余值。
+            body_location = _label_value(
+                text,
+                ("项目地点", "建设地点", "实施地点", "服务地点", "交货地点", "供货地点"),
+            ) or _label_value(text, ("招标项目所在地区", "项目所在地区"))
+            data["项目地点"] = body_location or _space(list_record.get("location"))
             if "项目规模" in data:
                 data["项目规模"] = _label_paragraph(
                     text,
@@ -1249,11 +1555,10 @@ class SxzwfwParser:
                 data["公示时间"] = publicity
                 data["招标编号/项目编号"] = project_number
                 data["中标候选人明细"] = details
-                # 保持框架既有扁平字段约定：多标段时在名称前保留标段；结构化
-                # 的纯名称和标段仍分别存放在“中标候选人明细”中。
+                # 企业名称字段只保存主体名称；标段归属保留在结构化明细中。
+                # 将“001某标段：”拼入名称会破坏企业关联和数据库检索。
                 data["中标候选人名称"] = [
-                    f"{item['标段']}：{item['候选人名称']}"
-                    if item["标段"] else item["候选人名称"]
+                    item["候选人名称"]
                     for item in details
                 ]
                 data["中标候选人报价"] = [item["候选人报价"] for item in details]
@@ -1265,9 +1570,10 @@ class SxzwfwParser:
                 data["定标候选人报价"] = [item["候选人报价"] for item in details]
             _fill_contacts(data, text)
         elif subtype == "zbjg":
-            details = _award_result_details(text)
+            details, consortium = _award_result_details(document, text)
             data["中标结果明细"] = details
             data["中标人名称"] = [item["中标人名称"] for item in details]
+            data["联合体成员"] = consortium
             data["中标价"] = [item["中标价"] for item in details]
             data["招标方式"] = _label_value(text, ("招标方式",)) or ("公开招标" if "公开招标" in text else "")
             data["工期"] = _label_value(text, ("工期", "计划工期", "服务期"))
@@ -1277,9 +1583,11 @@ class SxzwfwParser:
             data["依据文件"], data["依据文号"] = _approval(text)
             _fill_contacts(data, text)
         elif subtype == "gzjg":
-            data["公共类型"] = source_nature
-            data["公告内容"] = text
-            data["开标时间"] = _label_value(text, ("开标时间", "开启时间"))
+            data["公共类型"] = _correction_public_type(title, text)
+            data["公告内容"] = _correction_content(text)
+            data["开标时间"] = _corrected_datetime(
+                text, ("开标时间", "开启时间", "投标截止时间", "递交截止时间")
+            )
             data["标书发售时间"] = _time_range(text, ("获取时间", "招标文件获取时间"))
             data["依据文件"], data["依据文号"] = _approval(text)
             _fill_contacts(data, text)

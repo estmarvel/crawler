@@ -1,4 +1,5 @@
 from decimal import Decimal
+from types import SimpleNamespace
 
 from crawler_scrapy.schemas.notice_fields import canonicalize_notice_data
 from crawler_scrapy.sites.trade365 import config
@@ -42,9 +43,14 @@ def test_page_urls_keep_project_type_filter():
 
 
 def test_mixed_columns_are_classified_by_title():
-    assert classify_category("change", "某项目招标终止公告")[0] == "termination"
+    assert classify_category("change", "某项目招标终止公告") == (
+        "correction", "更正结果公示"
+    )
     assert classify_category("change", "某项目二次招标公告")[0] == "tender"
     assert classify_category("candidate", "某项目中标候选人公示")[0] == "candidate"
+    assert classify_category("candidate", "某项目中标候选人公示更正") == (
+        "correction", "更正结果公示"
+    )
     assert classify_category("award", "某项目中标结果公示")[0] == "award"
 
 
@@ -71,6 +77,20 @@ def test_tender_fields_contacts_and_identifiers_are_extracted():
     assert parsed.data["递交截止时间"] == "2026-08-31 09:30:00"
     assert parsed.data["招标人/采购人名称"] == "甲公司"
     assert parsed.data["招标代理机构"] == "乙公司"
+
+
+def test_explicit_project_location_precedes_broad_source_region():
+    parsed = Trade365Parser.parse(
+        "tender.goods",
+        _detail(
+            "智能化建设项目（不分标段）招标公告",
+            """<p>招标项目所在地区：山西省 太原市</p>
+            <p>1.1项目名称：智能化建设项目</p>
+            <p>1.5项目地点：招标人指定地点（详见招标文件）。</p>""",
+        ),
+    )
+
+    assert parsed.data["项目地点"] == "招标人指定地点（详见招标文件）"
 
 
 def test_candidate_table_only_uses_price_table():
@@ -156,7 +176,9 @@ def test_title_project_name_identifier_fallback_and_control_price():
         ),
     )
     assert control.data["项目名称"] == "某工程"
-    assert control.data["招标金额"] == "9738170.12元"
+    assert control.notice_type == "更正结果公示"
+    assert control.data["公共类型"] == "变更公告"
+    assert "9738170.12元" in control.data["公告内容"]
 
 
 def test_second_tender_name_joint_deadline_funding_and_investment_are_cleaned():
@@ -189,6 +211,50 @@ def test_reversed_source_date_range_is_flagged_without_fabricating_a_correction(
     assert parsed.validation_warnings == [
         "SOURCE_DATE_RANGE_REVERSED:预审文件获取时间结束日期早于开始日期"
     ]
+
+
+def test_snapshot_patterns_keep_scope_location_and_operation_semantics_separate():
+    parsed = Trade365Parser.parse(
+        "tender.engineering",
+        _detail(
+            "城中村改造工程（不分标段）招标公告",
+            """<p>招标项目所在地区：山西省 太原市 阳曲县</p>
+            <p>二、项目概况和招标范围</p>
+            <p>2.1项目规模：本工程位于太原市阳曲县北塔地村，建筑面积848.91㎡。</p>
+            <p>2.2招标内容与范围：本项目划分为两个标段：</p>
+            <p>001第一标段：换热站和消防水池工程。</p>
+            <p>建设地点：阳曲县北塔地村。</p><p>计划工期：90日历天。</p>
+            <p>002第二标段：挡土墙和门房工程。</p>
+            <p>建设地点：阳曲县高村村。</p><p>2.3质量要求：合格。</p>
+            <p>5.2递交方法：递交截止时间前，在网站上传电子版投标文件（加密）届时。</p>
+            <p>4.2获取方法：登录平台在线下载。本项目文件费为500元。</p>""",
+        ),
+    )
+
+    assert parsed.data["项目地点"] == "阳曲县北塔地村；阳曲县高村村"
+    assert "001第一标段" in parsed.data["招标内容与范围"]
+    assert "002第二标段" in parsed.data["招标内容与范围"]
+    assert "项目规模" not in parsed.data["招标内容与范围"]
+    assert "建设地点" not in parsed.data["招标内容与范围"]
+    assert "质量要求" not in parsed.data["招标内容与范围"]
+    assert parsed.data["递交方法"] == "递交截止时间前，在网站上传电子版投标文件（加密）"
+    assert parsed.data["获取方式"] == "登录平台在线下载"
+
+
+def test_government_purchase_demand_does_not_swallow_qualification_section():
+    parsed = Trade365Parser.parse(
+        "tender.goods",
+        _detail(
+            "医疗设备采购项目招标公告",
+            """<p>一、项目基本情况</p><p>5.采购需求：采购皮肤镜工作站1套。</p>
+            <table><tr><td>皮肤镜工作站</td><td>1套</td></tr></table>
+            <p>6.交货期：合同签订后30天</p>
+            <p>二、申请人的资格要求</p><p>具有医疗器械经营许可证。</p>""",
+        ),
+    )
+
+    assert "采购皮肤镜工作站1套" in parsed.data["招标内容与范围"]
+    assert "具有医疗器械经营许可证" not in parsed.data["招标内容与范围"]
 
 
 def test_trade365_contact_variants_are_mapped_to_correct_party_fields():
@@ -279,8 +345,81 @@ def test_spider_selects_expected_category_and_project_type_feeds():
     )
 
 
-def test_exporter_has_every_actual_category_and_project_type_route():
-    assert len(Trade365MultiFormatPipeline.ROUTES) == 15
-    assert Trade365MultiFormatPipeline.ROUTES["termination.engineering"] == (
-        "中招联合山西_终止公告_工程", "招标公告"
+def test_fresh_scheduler_seeds_selected_feed_roots():
+    spider = Trade365Spider(
+        categories="tender,candidate", project_types="engineering,service"
     )
+    spider.crawler = SimpleNamespace(
+        engine=SimpleNamespace(
+            slot=SimpleNamespace(
+                scheduler=SimpleNamespace(has_pending_requests=lambda: False)
+            )
+        ),
+        stats=SimpleNamespace(inc_value=lambda *_args, **_kwargs: None),
+    )
+
+    requests = list(spider.start_requests())
+
+    assert [request.cb_kwargs["feed"] for request in requests] == [
+        "tender.engineering", "tender.service",
+        "candidate.engineering", "candidate.service",
+    ]
+    assert all(request.cb_kwargs["page"] == 1 for request in requests)
+
+
+def test_resumed_scheduler_does_not_seed_duplicate_feed_roots():
+    stats = []
+    spider = Trade365Spider(
+        categories="tender,candidate", project_types="engineering,service"
+    )
+    spider.crawler = SimpleNamespace(
+        engine=SimpleNamespace(
+            _slot=SimpleNamespace(
+                scheduler=SimpleNamespace(has_pending_requests=lambda: True)
+            )
+        ),
+        stats=SimpleNamespace(
+            inc_value=lambda name: stats.append(name)
+        ),
+    )
+
+    assert list(spider.start_requests()) == []
+    assert stats == ["trade365/resume_skipped_start_request_seeding"]
+
+
+def test_exporter_has_every_actual_category_and_project_type_route():
+    assert len(Trade365MultiFormatPipeline.ROUTES) == 12
+    assert Trade365MultiFormatPipeline.ROUTES["correction.engineering"] == (
+        "中招联合山西_更正结果公示_工程", "更正结果公示"
+    )
+
+
+def test_deadline_is_not_fabricated_as_opening_time():
+    parsed = Trade365Parser.parse(
+        "tender.engineering",
+        _detail("某工程招标公告", "<p>投标截止时间：2026年8月31日9时30分</p>"),
+    )
+    assert parsed.data["递交截止时间"] == "2026-08-31 09:30:00"
+    assert parsed.data["开标时间"] == ""
+    assert parsed.data["开启时间"] == ""
+    assert parsed.data["项目性质"] == ""
+
+
+def test_correction_uses_correction_schema_and_keeps_only_change_content():
+    parsed = Trade365Parser.parse(
+        "change.goods",
+        _detail(
+            "设备采购招标延期公告",
+            """<p>（招标编号：SX-001）</p><p>一、内容</p>
+            <p>原开标时间：2026年8月1日9时30分</p>
+            <p>现开标时间：2026年8月8日9时30分</p>
+            <p>二、联系方式</p><p>招标人：甲公司</p>""",
+        ),
+    )
+    assert parsed.category == "correction"
+    assert parsed.notice_type == "更正结果公示"
+    assert parsed.data["公共类型"] == "延期公告"
+    assert parsed.data["开标时间"] == "2026-08-08 09:30:00"
+    assert "原开标时间" in parsed.data["公告内容"]
+    assert "现开标时间" in parsed.data["公告内容"]
+    assert "联系方式" not in parsed.data["公告内容"]

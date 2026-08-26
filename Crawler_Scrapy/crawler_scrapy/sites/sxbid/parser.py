@@ -11,6 +11,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 from lxml import etree, html as lxml_html
 
+from crawler_scrapy.ai.field_contracts import normalize_project_nature
 from crawler_scrapy.sites.bitbid.parser import BitbidParser, clean_html
 from crawler_scrapy.sites.sxbid import config
 
@@ -230,7 +231,56 @@ def extract_pdf_text(
 
 
 class SxbidParser(BitbidParser):
-    parser_version = "sxbid-v2-verified-html-pdf"
+    parser_version = "sxbid-v5-qualification-headings"
+
+    QUALIFICATION_SECTION_TITLES = (
+        "投标人资格要求",
+        "申请人资格要求",
+        "投标人的资格",
+        "申请人的资格",
+        "资格条件要求",
+    )
+
+    @classmethod
+    def _label_with_optional_note(cls, text: str, *labels: str) -> str:
+        """兼容“递交截止时间（同开标时间）：...”一类带注释标签。"""
+
+        value = cls._label(text, *labels)
+        if value:
+            return value
+        for label in labels:
+            matched = re.search(
+                rf"(?m)(?:^|\n)\s*[（(]?(?:\d+(?:\.\d+)*[、.]?\s*)?"
+                rf"{re.escape(label)}\s*[（(][^）)\n]{{1,30}}[）)]\s*[：:]\s*([^\n]+)",
+                text,
+            )
+            if matched:
+                return matched.group(1).strip(" ：:;；")
+        return ""
+
+    @classmethod
+    def _deadline_sxbid(cls, text: str) -> str:
+        value = cls._label_with_optional_note(
+            text,
+            "投标文件递交截止时间",
+            "资格预审申请文件递交截止时间",
+            "递交截止时间",
+            "投标截止时间",
+        )
+        if re.fullmatch(r"(?:同)?开标时间", _space(value)):
+            value = cls._label_with_optional_note(
+                text, "文件开启时间", "开启时间", "开标时间"
+            )
+        # PDF 文字层可能把下一句拼到同一行。这里只保留明确日期和时间，
+        # 避免“申请人应在截止时间前……”进入数据库字段。
+        matched = re.search(
+            r"20\d{2}\s*(?:[-/.]\s*\d{1,2}\s*[-/.]\s*\d{1,2}"
+            r"|年\s*\d{1,2}\s*月\s*\d{1,2}\s*日)"
+            r"(?:\s*\d{1,2}\s*(?::|时)\s*\d{1,2}"
+            r"(?:\s*(?::|分)\s*\d{1,2})?\s*(?:分|秒)?)?",
+            value,
+        )
+        return _space(matched.group(0)) if matched else _space(value)
 
     @classmethod
     def parse(
@@ -260,7 +310,8 @@ class SxbidParser(BitbidParser):
 
         if category == "plan":
             data = {
-                "项目性质": headers.get("发布类型", "招标计划"),
+                # “招标计划”是公告类型，不是项目法定性质。
+                "项目性质": normalize_project_nature(headers.get("发布类型", "")),
                 "招标方式": headers.get("招标方式", ""),
                 **common,
                 "项目类型": headers.get("项目类型", "") or _space((list_record or {}).get("project_type")),
@@ -268,7 +319,8 @@ class SxbidParser(BitbidParser):
                 "招标内容": headers.get("招标内容", ""),
                 "招标人名称": headers.get("招标人名称", ""),
                 "行政监督部门": headers.get("行政监督部门", ""),
-                "建设地点": headers.get("建设地点", "") or _space((list_record or {}).get("region")),
+                # 列表地区只是站内检索分类，不能作为公告明确披露的建设地点。
+                "建设地点": headers.get("建设地点", ""),
                 "建设内容及规模": headers.get("建设内容及规模", ""),
                 "招标公告（资格预审公告）预计发布时间": headers.get("招标公告（资格预审公告）预计发布时间", ""),
             }
@@ -393,22 +445,24 @@ class SxbidParser(BitbidParser):
             "项目总投资/估算金额": cls._label(text, "项目总投资", "估算金额", "投资估算"),
             "招标金额": cls._label(text, "招标金额", "最高投标限价", "招标控制价", "预算金额"),
             "资金来源": cls._funding_source_sxbid(text),
-            "项目地点": headers.get("实施地", "") or cls._label(text, "项目地点", "建设地点") or _space(list_record.get("region")),
+            # 列表“地区”只是检索分类，不冒充正文中的实际履约地点；它仍
+            # 保存在 fieldMeta.region 中用于检索和溯源。
+            "项目地点": headers.get("实施地", "") or cls._label(
+                text, "项目地点", "建设地点", "实施地点", "服务地点", "交货地点"
+            ),
             "招标人/采购人名称": contacts.get("owner", {}).get("name", ""),
             "申请人资格要求/投标人资格要求": cls._section(
                 text,
-                ("投标人资格要求", "申请人资格要求"),
+                cls.QUALIFICATION_SECTION_TITLES,
                 ("资格预审文件的获取", "招标文件的获取", "投标文件的递交", "资格预审申请文件的递交"),
             ),
             "预审文件获取时间": cls._time_range(text, "获取时间") or cls._label(text, "获取时间"),
             "获取方式": cls._paragraph_label(text, "获取方式") or cls._paragraph_label(text, "获取方法"),
-            "递交截止时间": cls._label(
-                text, "投标文件递交截止时间", "资格预审申请文件递交截止时间", "递交截止时间", "投标截止时间"
-            ),
+            "递交截止时间": cls._deadline_sxbid(text),
             "递交方法": cls._label(text, "递交方法", "递交方式"),
             "开启时间": cls._label(text, "文件开启时间", "开启时间", "开标时间"),
             "开启方式": cls._label(text, "文件开启方式", "开启方式", "开标方式"),
-            "开启地点": cls._label(text, "开启地点", "开标地点", "递交地址"),
+            "开启地点": cls._label(text, "开启地点", "开标地点"),
             "评审办法": cls._paragraph_label(text, "评审办法") or cls._label(text, "评标办法"),
             "投标保证金方式": cls._section(
                 text,
@@ -421,7 +475,7 @@ class SxbidParser(BitbidParser):
             shared["项目概况与招标范围"] = cls._section(
                 text,
                 ("项目概况与招标范围", "项目概况和招标范围"),
-                ("投标人资格要求", "申请人资格要求"),
+                cls.QUALIFICATION_SECTION_TITLES,
             )
         else:
             shared.update({
@@ -435,7 +489,7 @@ class SxbidParser(BitbidParser):
                 "招标内容与范围": cls._section(
                     text,
                     ("招标内容与范围", "招标范围"),
-                    ("投标人资格要求", "申请人资格要求"),
+                    cls.QUALIFICATION_SECTION_TITLES,
                 ),
             })
         return shared
@@ -450,7 +504,8 @@ class SxbidParser(BitbidParser):
             or explicit_project
             or headers.get("项目编号", "")
             or generic_project
-            or chain_id
+            # getRelatedContent 路径中的 chain_id 是站内关联键，尚未证明等同
+            # 业务项目编号；只保留在 fieldMeta.projectChainId，不写业务字段。
         )
         tender_number = cls._identifier_sxbid(
             text, "招标编号", "采购编号", "代理编号"
@@ -511,12 +566,20 @@ class SxbidParser(BitbidParser):
         labelled = cls._label(text, "项目名称")
         if labelled and len(labelled) <= 300:
             return labelled
-        cleaned = re.sub(
-            r"(?:资格预审公告|招标公告|中标候选人公示|定标候选人公示|中标结果公示|"
-            r"(?:变更|澄清|延期|终止|撤销|更正).*公告|招标控制价(?:公告)?|合同)$",
-            "",
-            title,
-        ).strip()
+        # 变更类标题常见“项目招标公告变更公告”这种双层后缀。一次替换只会
+        # 去掉最外层“变更公告”，因此循环清理，直到不再命中公告类型后缀。
+        cleaned = title.strip()
+        suffix = (
+            r"(?:资格预审公告|招标公告|中标候选人公示|定标候选人公示|"
+            r"中标结果公示|(?:第?[一二三四五六七八九十\d]+次)?"
+            r"(?:变更|澄清|延期|终止|撤销|更正).*?公告|"
+            r"招标控制价(?:公告)?|合同)$"
+        )
+        while True:
+            previous = cleaned
+            cleaned = re.sub(suffix, "", cleaned).strip()
+            if cleaned == previous:
+                break
         cleaned = re.sub(r"(?:重新|二次|再次)$", "", cleaned).strip()
         return re.sub(r"项目项目(?=\s*[（(]\d+标段[）)]$)", "项目", cleaned)
 
@@ -528,19 +591,26 @@ class SxbidParser(BitbidParser):
         owner_label = r"(?:招\s*标\s*人|采\s*购\s*人|建设单位)"
         agency_label = r"(?:招\s*标\s*代理\s*机构(?:名称)?|采购代理机构|招标代理|代理\s*机构)"
         owner = re.search(
-            rf"(?s){owner_label}\s*[：:]\s*(.*?)(?={agency_label}\s*[：:]|\Z)",
+            rf"(?ms)^\s*{owner_label}\s*[：:]\s*(.*?)(?=^\s*{agency_label}\s*[：:]|\Z)",
             text,
         )
         agency = re.search(
-            rf"(?s){agency_label}\s*[：:]\s*(.*?)(?=招标人或(?:其)?招标代理机构|\Z)",
+            rf"(?ms)^\s*{agency_label}\s*[：:]\s*(.*?)"
+            rf"(?=^\s*招标人或(?:其)?招标代理机构|\Z)",
             text,
+        )
+
+        all_labels = (
+            r"地\s*址|联系地址|项目联系人|联\s*系\s*人|联系人|电\s*话|"
+            r"联系电话|联系方式|联络电话|邮\s*编|电\s*子\s*邮\s*件|"
+            r"电\s*子\s*邮\s*箱|邮箱|招\s*标\s*方\s*式|开\s*标\s*时\s*间|公告时间"
+            r"|招标代理机构项目负责人|招标人或(?:其)?招标代理机构"
         )
 
         def labelled(block: str, pattern: str) -> str:
             matched = re.search(
                 rf"(?ms)(?:^|\n)\s*(?:{pattern})\s*[：:]\s*(.*?)"
-                rf"(?=\n\s*(?:地\s*址|联系地址|项目联系人|联\s*系\s*人|联系人|"
-                rf"电\s*话|联系电话|联系方式|联络电话|邮\s*编|电子邮件|电子邮箱|邮箱)\s*[：:]|\Z)",
+                rf"(?=\s*(?:{all_labels})\s*[：:]|\Z)",
                 block,
             )
             if not matched:
@@ -550,16 +620,39 @@ class SxbidParser(BitbidParser):
                 r"(?<=[\u4e00-\u9fff])\s+(?=[\u4e00-\u9fff])", "", value
             )
 
+        def phone_value(block: str, inline: str = "") -> str:
+            raw = labelled(
+                block, r"电\s*话|联系电话|联系方式|联络电话"
+            ) or inline
+            normalized = str(raw or "").replace("—", "-").replace("－", "-")
+            values = re.findall(
+                r"(?<!\d)(?:\+?86[- ]?)?(?:0\d{2,3}[- ]?\d{7,8}(?:[- ]\d{1,6})?"
+                r"|1[3-9]\d{9})(?!\d)",
+                normalized,
+            )
+            return "；".join(dict.fromkeys(_space(value) for value in values))
+
         for key, matched in (("owner", owner), ("agency", agency)):
             if not matched:
                 continue
             block = matched.group(1).strip()
             first = _space(block.splitlines()[0]) if block else ""
+            inline_phone = re.search(
+                r"[（(]\s*(?:联系电话|电话|联系方式)\s*[：:]\s*([^）)]+)[）)]",
+                first,
+            )
+            first = re.sub(
+                r"\s*[（(]\s*(?:联系电话|电话|联系方式)\s*[：:]\s*[^）)]+[）)]\s*$",
+                "",
+                first,
+            ).strip()
             result[key] = {
                 "name": first,
                 "address": labelled(block, r"地\s*址|联系地址"),
                 "contact": labelled(block, r"项目联系人|联\s*系\s*人|联系人"),
-                "phone": labelled(block, r"电\s*话|联系电话|联系方式|联络电话"),
+                "phone": phone_value(
+                    block, _space(inline_phone.group(1)) if inline_phone else ""
+                ),
             }
         return result
 
@@ -591,10 +684,10 @@ class SxbidParser(BitbidParser):
             r".{2,180}?(?:联合体|有限责任公司|股份有限公司|集团有限公司|"
             r"有限公司|公司|集团|研究院|设计院|研究所|中心|厂|院)"
         )
-        unit_match = re.search(r"(?:投标|中标)?(?:总)?报价[^\n]*[（(](亿元|万元|元)[）)]", basic)
+        unit_match = re.search(r"(?:投标|中标)?(?:总)?报价[^\n]*[（(](亿元|万元|元|%|％)[）)]", basic)
         if not unit_match:
             unit_match = re.search(
-                r"(?:报价|价)\s*[（(](亿元|万元|元)[）)]",
+                r"(?:报价|价)\s*[（(](亿元|万元|元|%|％)[）)]",
                 "\n".join(basic.splitlines()[:15]),
             )
         unit = unit_match.group(1) if unit_match else ""
@@ -623,7 +716,10 @@ class SxbidParser(BitbidParser):
             )
             if matched:
                 rank = int(matched.group(1))
-                names[rank] = _space(matched.group(2))
+                parsed_name = _space(matched.group(2))
+                names[rank] = cls._complete_inline_wrapped_company(
+                    lines, line_index, parsed_name
+                ) or parsed_name
                 amount = _space(matched.group(3))
                 amounts[rank] = amount if re.search(r"亿元|万元|元|%|％", amount) else f"{amount}{unit}"
                 continue
@@ -718,24 +814,149 @@ class SxbidParser(BitbidParser):
             value,
         ) else ""
 
+    @staticmethod
+    def _complete_inline_wrapped_company(
+        lines: list[str], index: int, parsed_name: str
+    ) -> str:
+        """补全“前半公司名 / 排名+中段 / 后缀”三行式 PDF 单元格。"""
+
+        if index <= 0 or index + 1 >= len(lines):
+            return ""
+        before = _space(lines[index - 1])
+        after = _space(lines[index + 1])
+        if (
+            not before
+            or not after
+            or re.search(r"候选人名称|投标报价|排序|序号|质量|工期", before)
+            or not re.fullmatch(
+                r"(?:有限责任公司|股份有限公司|集团有限公司|有限公司|公司|"
+                r"集团|研究院|设计院|研究所|中心|厂|院)",
+                re.sub(r"\s+", "", after),
+            )
+        ):
+            return ""
+        value = re.sub(r"\s+", "", before + parsed_name + after)
+        if not (4 <= len(value) <= 180):
+            return ""
+        return value if re.search(
+            r"(?:联合体|有限责任公司|股份有限公司|集团有限公司|有限公司|公司|"
+            r"集团|研究院|设计院|研究所|中心|厂|院)$",
+            value,
+        ) else ""
+
     @classmethod
     def _award_details_sxbid(
         cls, text: str
     ) -> tuple[list[dict[str, str]], list[str]]:
         rows = cls._award_details(text)
         if not rows:
+            # 部分公共资源 PDF 使用“中标单位：…”或无冒号的
+            # “中标人名称 某公司”，而基类只识别“中标人：…”。只接受
+            # 明确角色标签且名称以机构后缀结束，避免从叙述段落猜测实体。
+            labelled = list(re.finditer(
+                r"(?m)^\s*(?:中\s*标\s*(?:单位|人名称)|成交(?:单位|供应商))"
+                r"\s*[：:]?\s*([^\n]{2,240}?(?:有限责任公司|股份有限公司|"
+                r"集团有限公司|有限公司|公司|集团|研究院|设计院|研究所|中心|厂|院))\s*$",
+                text,
+            ))
+            for index, matched in enumerate(labelled):
+                end = labelled[index + 1].start() if index + 1 < len(labelled) else min(
+                    len(text), matched.end() + 800
+                )
+                context = text[matched.end():end]
+                name = cls._clean_result_name(matched.group(1))
+                price_match = re.search(
+                    r"(?:中\s*标\s*(?:金额|价格|价)|成交(?:金额|价格|价)|投标报价)"
+                    r"\s*[：:]?\s*([\d,.，]+\s*(?:亿元|万元|元|%|％))",
+                    context,
+                )
+                price = (
+                    _space(price_match.group(1))
+                    if price_match
+                    else cls._label(
+                        context,
+                        "中标金额", "中标价格", "中标价", "成交金额", "成交价",
+                    ) or cls._amount(context)
+                )
+                rows.append({
+                    "标段": cls._label(text, "标段", "标段（包）"),
+                    "中标人名称": name,
+                    "中标价": price,
+                })
+        if not rows:
+            info = cls._section(
+                text,
+                ("中标人信息", "中标人情况"),
+                ("其他公示内容", "其他公告内容", "监督部门", "联系方式"),
+            )
+            company = (
+                r"[^\n]{2,180}?(?:有限责任公司|股份有限公司|集团有限公司|"
+                r"有限公司|公司|集团|研究院|设计院|研究所|中心|厂|院|队)"
+            )
+            for matched in re.finditer(
+                rf"(?m)^\s*(?P<section>[^\s]{{0,30}}?(?:标段|包))?\s*"
+                rf"(?P<name>{company})\s{{2,}}"
+                r"(?P<price>[\d,.，]+\s*(?:亿元|万元|元|%|％))\s*$",
+                info,
+            ):
+                rows.append({
+                    "标段": _space(matched.group("section") or ""),
+                    "中标人名称": cls._clean_result_name(matched.group("name")),
+                    "中标价": _space(matched.group("price")),
+                })
+            if not rows:
+                lines = info.splitlines()
+                for index, line in enumerate(lines):
+                    name_match = re.fullmatch(rf"\s*({company})\s*", line)
+                    if not name_match:
+                        continue
+                    context = "\n".join(lines[index + 1:index + 4])
+                    price_match = re.search(
+                        r"(?:中标价|中标价格|投标报价)\s*[：:]\s*"
+                        r"([\d,.，]+\s*(?:亿元|万元|元|%|％))",
+                        context,
+                    )
+                    if price_match:
+                        rows.append({
+                            "标段": "",
+                            "中标人名称": cls._clean_result_name(name_match.group(1)),
+                            "中标价": _space(price_match.group(1)),
+                        })
+                        break
+        if not rows:
+            leader = cls._label(text, "联合体牵头单位", "联合体牵头人")
+            if leader:
+                members = cls._list_label(text, "联合体成员单位") \
+                    or cls._list_label(text, "联合体成员")
+                rows = [{
+                    "标段": cls._label(text, "标段", "标段（包）"),
+                    "中标人名称": ";".join([leader, *members]),
+                    "中标价": cls._label(
+                        text, "中标金额", "中标价格", "中标价", "投标报价"
+                    ),
+                }]
+        if not rows:
             selected = re.search(
-                r"(?:招标人\s*)?确定\s*(.{2,300}?)\s*为(?:本项目的)?中标人",
+                r"(?:(?:由\s*)?招标人\s*)?确定\s*(.{2,300}?)\s*为"
+                r"(?:(?:本|该)?(?:项目|标段)(?:的)?|.{0,240}?的)?"
+                r"\s*中\s*标\s*人",
                 text,
                 re.S,
             )
             if selected:
                 name = _space(selected.group(1)).strip("，,。；;")
                 name = re.sub(r"[（(]联合体[）)]$", "", name).strip()
+                name = re.sub(
+                    r"[（(]\s*联合体(?:牵头人|成员单位|成员)\s*[）)]",
+                    "",
+                    name,
+                )
                 parties = [
                     item.strip() for item in re.split(r"[、;；]", name) if item.strip()
                 ]
-                price = cls._label(text, "中标金额", "中标价格", "中标价")
+                price = cls._label(
+                    text, "中标金额", "中标价格", "中标价", "投标报价"
+                )
                 rows = [{
                     "标段": cls._label(text, "标段", "标段（包）"),
                     "中标人名称": ";".join(parties),
@@ -775,7 +996,7 @@ class SxbidParser(BitbidParser):
         matched = re.search(
             r"(?s)(?:项目)?资金来源(?:为|是|由)\s*(.+?)"
             r"(?=[，,]\s*招\s*标\s*人\s*(?:为|是|[：:])|[。；;]|"
-            r"\n\s*(?:[一二三四五六七八九十]+[、.]|\d+(?:\.\d+)*[、.])\s*[^\n]+|\Z)",
+            r"\n\s*(?:[一二三四五六七八九十]+[、.．]|\d+(?:[.．]\d+)*[、.．])\s*[^\n]+|\Z)",
             text,
         )
         if not matched:
@@ -794,7 +1015,7 @@ class SxbidParser(BitbidParser):
     @staticmethod
     def _paragraph_label(text: str, label: str) -> str:
         matched = re.search(
-            rf"(?s){re.escape(label)}\s*[：:]\s*(.*?)(?=\n\s*(?:[一二三四五六七八九十]+[、.]|\d+(?:\.\d+)*[、.])\s*[^\n]+|\Z)",
+            rf"(?s){re.escape(label)}\s*[：:]\s*(.*?)(?=\n\s*(?:[一二三四五六七八九十]+[、.．]|\d+(?:[.．]\d+)*[、.．])\s*[^\n]+|\Z)",
             text,
         )
         return _lines(matched.group(1)) if matched else ""

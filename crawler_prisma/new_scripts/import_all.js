@@ -18,6 +18,7 @@ function validateArgs(args) {
       supported.has(arg) ||
       arg.startsWith("--site=") ||
       arg.startsWith("--output-root=") ||
+      arg.startsWith("--env-file=") ||
       arg.startsWith("--api-root=")
     ) continue;
     throw new Error(`Unknown argument: ${arg}`);
@@ -38,7 +39,7 @@ function main() {
   if (args.includes("--help") || args.includes("-h")) {
     console.log(`Usage:
   node import_all.js [--commit] [--site=<site>] [--output-root=<path>]
-                     [--api-root=<path>] [--allow-missing-files]
+                     [--env-file=<path>] [--allow-missing-files]
 
 Order:
   1. raw notice metadata -> MySQL; payload/text -> MongoDB

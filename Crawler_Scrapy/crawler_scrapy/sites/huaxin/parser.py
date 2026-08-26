@@ -61,6 +61,10 @@ def clean_html_keep_lines(value: Any) -> str:
     if not value:
         return ""
     text = unescape(str(value))
+    # 少数玖邦历史模板把全角空格错误序列化成了字面量 ``u3000``，而不是
+    # Unicode 字符 ``\u3000``。它只承担排版作用，若不先清理会污染机构名、
+    # 地址和长章节，并妨碍后续章节边界识别。
+    text = re.sub(r"(?:\\u3000|u3000)+", " ", text)
     text = re.sub(r"(?is)<(script|style)\b[^>]*>.*?</\1>", "", text)
     text = re.sub(r"(?i)<\s*br\s*/?\s*>", "\n", text)
     text = re.sub(
@@ -69,7 +73,7 @@ def clean_html_keep_lines(value: Any) -> str:
         text,
     )
     text = re.sub(r"<[^>]+>", "", text)
-    text = text.replace("\xa0", " ")
+    text = text.replace("\xa0", " ").replace("\u3000", " ")
     lines = [re.sub(r"[ \t]+", " ", line).strip() for line in text.splitlines()]
     return "\n".join(line for line in lines if line)
 
@@ -310,6 +314,7 @@ def _normalize_contact_text(text: str) -> str:
         (r"招\s*标\s*人", "招标人"),
         (r"采\s*购\s*人", "采购人"),
         (r"详\s*细\s*地\s*址", "详细地址"),
+        (r"联\s*系\s*地\s*址", "联系地址"),
         (r"地\s*址", "地址"),
         (r"联\s*系\s*人", "联系人"),
         (r"联\s*系\s*电\s*话", "联系电话"),
@@ -346,6 +351,11 @@ def _contact_block(text: str, party: str) -> str:
         if party == "agent"
         else ("招标代理机构：", "招标代理机构:", "代理机构：", "代理机构:")
     )
+    other_party = (
+        re.compile(r"^(?:招标人|采购人)\s*[：:]")
+        if party == "agent"
+        else re.compile(r"^(?:招标代理机构|代理机构)\s*[：:]")
+    )
     begin = next(
         (index for index, line in enumerate(lines) if start_pattern.match(line)),
         -1,
@@ -354,7 +364,7 @@ def _contact_block(text: str, party: str) -> str:
         return ""
     chunks: list[str] = []
     for line in lines[begin:]:
-        if chunks and any(stop in line for stop in stops):
+        if chunks and (any(stop in line for stop in stops) or other_party.match(line)):
             break
         chunks.append(line)
     return "\n".join(chunks)
@@ -364,7 +374,10 @@ def _contact_value(text: str, party: str, field: str) -> str:
     block = _contact_block(text, party)
     labels = {
         "name": ("招标代理机构", "代理机构") if party == "agent" else ("招标人", "采购人"),
-        "address": ("招标代理机构地址", "招标人地址", "详细地址", "地址", "地 址"),
+        "address": (
+            "招标代理机构地址", "招标人地址", "详细地址", "联系地址",
+            "地址", "地 址",
+        ),
         "contact": ("招标代理机构联系人", "招标人联系人", "联系人", "联 系 人"),
         "phone": (
             "招标代理机构联系方式", "招标人联系方式", "联系方式",
@@ -700,7 +713,10 @@ def _candidate_name_price_pairs(text: str) -> tuple[list[str], list[str]]:
         blocks.append((_infer_candidate_section(raw_lines[:start]), lines))
 
     name_pattern = re.compile(
-        r"(?:(?:推荐\s*)?第?[一二三123]?名?\s*中标候选人(?:名称)?|第[一二三123]中标候选人(?:名称)?)\s*[：:]\s*(.+)$"
+        r"(?:推荐\s*入围\s*中标候选人\s*[一二三四五六七八九十\d]+"
+        r"|(?:推荐\s*)?第?[一二三四五六七八九十\d]?名?\s*中标候选人(?:名称)?"
+        r"|第[一二三四五六七八九十\d]+中标候选人(?:名称)?)"
+        r"\s*[：:]\s*(.+)$"
     )
     # 玖邦常把名次、候选人和报价写在同一行，例如：
     # “第1名：甲公司,投标报价：782000元”。名次只用于识别记录，不写入公司名。
@@ -709,7 +725,14 @@ def _candidate_name_price_pairs(text: str) -> tuple[list[str], list[str]]:
     )
     inline_price_pattern = re.compile(
         r"(投标总报价|投标报价|响应报价|投标价格|报价)"
-        r"(?:\s*[（(][^）)\n]{1,80}[）)])?\s*[：:]\s*([^，,；;]+)"
+        r"(?:\s*[（(][^）)\n]{1,80}[）)])?\s*(?:[：:]\s*)?"
+        r"(.+?)(?=[，,；;]\s*(?:工期|监理服务期限|服务期限|服务期|"
+        r"交货期|供货期|质量|项目负责人|项目经理|职业资格证书|"
+        r"该投标人)|[。.]?$)"
+    )
+    trailing_candidate_field = re.compile(
+        r"[，,；;]\s*(?=(?:工期|服务期|监理服务期限|交货期|供货期|"
+        r"质量|项目负责人|项目经理|职业资格证书|该投标人))"
     )
     price_pattern = re.compile(
         r"(.{0,40}?(?:投标总报价|投标报价|响应报价|投标价格|报价)"
@@ -725,7 +748,7 @@ def _candidate_name_price_pairs(text: str) -> tuple[list[str], list[str]]:
             (
                 index
                 for index, line in enumerate(block_lines)
-                if re.fullmatch(r"中标候选人(?:名称)?", line)
+                if re.fullmatch(r"(?:中标|入围)候选人(?:名称)?", line)
             ),
             -1,
         )
@@ -786,6 +809,21 @@ def _candidate_name_price_pairs(text: str) -> tuple[list[str], list[str]]:
                 if candidate_name:
                     candidates.append((candidate_name, quote_lines))
 
+        # 入围框架协议有时只公布“序号 / 入围候选人名称 / 排名 / 公司”，
+        # 不设置报价列。报价未发布时仍保留候选人，并用空值维持数组位置对齐。
+        if candidate_header >= 0 and price_header < 0:
+            cursor = candidate_header + 1
+            while cursor + 1 < len(block_lines):
+                if not re.fullmatch(r"\d+", block_lines[cursor]):
+                    cursor += 1
+                    continue
+                candidate_name = block_lines[cursor + 1].strip(" ；;，,。")
+                if not candidate_name or re.fullmatch(r"\d+", candidate_name):
+                    cursor += 1
+                    continue
+                candidates.append((candidate_name, []))
+                cursor += 2
+
         active_index = -1
         for line in (() if candidates else block_lines):
             if re.search(r"中标候选人(?:基本情况|按照|响应|资格能力|公示)", line):
@@ -798,20 +836,42 @@ def _candidate_name_price_pairs(text: str) -> tuple[list[str], list[str]]:
                 if inline_price_match:
                     candidate_name = ranked_content[: inline_price_match.start()]
                     candidate_name = candidate_name.strip(" ；;，,。").strip()
-                    price_value = inline_price_match.group(2).strip().rstrip("。")
+                    price_value = inline_price_match.group(2).strip().rstrip(
+                        "：:。."
+                    )
                     quote_lines.append(
                         f"{inline_price_match.group(1)}：{price_value}"
                     )
                 else:
-                    candidate_name = ranked_content.strip(" ；;，,。").strip()
+                    candidate_name = trailing_candidate_field.split(
+                        ranked_content, maxsplit=1
+                    )[0].strip(" ；;，,。").strip()
                 if candidate_name:
                     candidates.append((candidate_name, quote_lines))
                     active_index = len(candidates) - 1
                 continue
             name_match = name_pattern.search(line)
             if name_match:
-                candidate_name = re.sub(r"\s+", " ", name_match.group(1)).strip(" ；;，,")
-                candidates.append((candidate_name, []))
+                candidate_content = re.sub(
+                    r"\s+", " ", name_match.group(1)
+                ).strip(" ；;，,")
+                inline_price_match = inline_price_pattern.search(
+                    candidate_content
+                )
+                quote_lines: list[str] = []
+                if inline_price_match:
+                    candidate_name = candidate_content[
+                        : inline_price_match.start()
+                    ].strip(" ；;，,")
+                    quote_lines.append(
+                        f"{inline_price_match.group(1)}："
+                        f"{inline_price_match.group(2).strip().rstrip('：:。.')}"
+                    )
+                else:
+                    candidate_name = trailing_candidate_field.split(
+                        candidate_content, maxsplit=1
+                    )[0].strip(" ；;，,")
+                candidates.append((candidate_name, quote_lines))
                 active_index = len(candidates) - 1
                 continue
             price_match = price_pattern.search(line)
@@ -819,6 +879,26 @@ def _candidate_name_price_pairs(text: str) -> tuple[list[str], list[str]]:
                 candidates[active_index][1].append(
                     f"{price_match.group(1).strip()}：{price_match.group(2).strip()}"
                 )
+
+        # 少量玖邦公告仅使用“一、推荐中标候选人”标题，下一行直接给出公司名，
+        # 没有“第一中标候选人：”标签。只接受紧邻标题且具有机构后缀的行，
+        # 避免把评审说明、异议说明或监督部门误当成候选人。
+        if not candidates:
+            plain_heading = re.compile(
+                r"^(?:[一二三四五六七八九十\d]+[、.．]\s*)?"
+                r"推荐(?:的)?\s*中标候选人\s*[：:]?$"
+            )
+            organization = re.compile(
+                r"(?:公司|集团|银行|研究院|研究所|设计院|事务所|中心|"
+                r"合作社|大学|学院|医院|委员会|政府|厂|矿|局)$"
+            )
+            for index, line in enumerate(block_lines[:-1]):
+                if not plain_heading.fullmatch(line):
+                    continue
+                candidate_name = block_lines[index + 1].strip(" ；;，,。")
+                if len(candidate_name) <= 200 and organization.search(candidate_name):
+                    candidates.append((candidate_name, []))
+                break
         deduplicated: list[tuple[str, list[str]]] = []
         positions: dict[str, int] = {}
         for candidate_name, quote_lines in candidates:
@@ -1056,7 +1136,7 @@ def _attachments(detail: Mapping[str, Any]) -> list[dict[str, Any]]:
 class HuaxinParser:
     """把华新详情 JSON 转换为框架的八类公告字段。"""
 
-    parser_version = "huaxin-v12-identifiers"
+    parser_version = "huaxin-v15-correction-title-routing"
     platform_name = PLATFORM_NAME
     web_base_url = WEB_BASE_URL
 
@@ -1185,7 +1265,9 @@ class HuaxinParser:
         if "所属行业" in data:
             data["所属行业"] = _string(detail.get("industryName"))
         if "组织形式" in data:
-            data["组织形式"] = _string(detail.get("annNum"))
+            # ``annNum`` 是“常规招标/重新招标/二次招标”等公告批次描述，
+            # 并非“委托招标/自行招标”的组织形式。
+            data["组织形式"] = _extract_label(text, ("组织形式",))
         if "发布日期" in data:
             data["发布日期"] = _string(detail.get("releaseTime") or detail.get("createTime"))
         if "发布网站" in data:
@@ -1196,13 +1278,13 @@ class HuaxinParser:
     def _fill_contacts(cls, data: dict[str, Any], detail: Mapping[str, Any], contact: str) -> None:
         # 正文联系方式章节是对外公示的最终值；顶层 API 字段可能只是集团或
         # 项目归属单位，因此仅在正文没有明确值时兜底。
-        bidder_name = _join_distinct(
-            _contact_value(contact, "bidder", "name"),
-            detail.get("bidName"),
+        # 正文联系方式是最终公示值，API 顶层名称仅作缺失兜底。旧逻辑用
+        # “|”拼接会重复同一机构，也会把联合招标人与牵头单位错误拆开。
+        bidder_name = _contact_value(contact, "bidder", "name") or _string(
+            detail.get("bidName")
         )
-        agent_name = _join_distinct(
-            _contact_value(contact, "agent", "name"),
-            detail.get("companyName"),
+        agent_name = _contact_value(contact, "agent", "name") or _string(
+            detail.get("companyName")
         )
         for field in ("招标人/采购人名称", "招标人/采购人"):
             if field in data:
@@ -1248,7 +1330,11 @@ class HuaxinParser:
     @classmethod
     def _extract_tender(cls, data: dict[str, Any], detail: Mapping[str, Any], *, prequalification: bool) -> None:
         text, contact = cls._common(data, detail)
-        data["开标时间"] = _string(detail.get("submitDeadline")) or _extract_label(text, ("开标时间", "开启时间", "递交截止时间"))
+        # 截止时间与开标/开启时间即使数值相同也具有不同业务语义，只接受
+        # 各自明确标签或等价 API 字段，不再由 submitDeadline 相互复制。
+        data["开标时间"] = _extract_label(text, ("开标时间",)) or _string(
+            detail.get("openTime") or detail.get("bidOpenTime")
+        )
         data["项目编号/招标编号"] = _project_numbers(detail, text)
         data["项目类型/行业分类"] = _string(detail.get("classificationName") or detail.get("industryName"))
         data["项目总投资/估算金额"] = _extract_label(text, ("项目总投资", "估算金额", "项目估算"))
@@ -1267,12 +1353,29 @@ class HuaxinParser:
             )
             funding_source = match.group(1).strip() if match else ""
         data["资金来源"] = funding_source
-        body_location = _extract_label(
-            text,
-            ("招标项目所在地区", "项目所在地区", "项目地点", "建设地点", "工程地点"),
+        # 优先实际建设/履约地点；仅有泛化“所在地区”时使用 API 行政区，
+        # 不能把“中国-山西省”和“运城市”用竖线拼成一个地点。
+        body_location = next(
+            (
+                value
+                for label in (
+                    "建设地点", "项目地点", "工程地点", "实施地点",
+                    "服务地点", "交货地点", "供货地点",
+                )
+                if (value := _extract_label(text, (label,)))
+            ),
+            "",
+        )
+        regional_location = next(
+            (
+                value
+                for label in ("项目所在地区", "招标项目所在地区")
+                if (value := _extract_label(text, (label,)))
+            ),
+            "",
         )
         api_location = _string(detail.get("administrativeName"))
-        data["项目地点"] = _join_distinct(body_location, api_location)
+        data["项目地点"] = body_location or api_location or regional_location
         if "项目规模" in data:
             data["项目规模"] = _extract_label(text, ("项目规模", "建设规模", "工程规模"))
         if "工期/服务期/供货日期" in data:
@@ -1284,15 +1387,37 @@ class HuaxinParser:
             overview = _extract_tender_scope(text)
         overview_field = "项目概况与招标范围" if prequalification else "招标内容与范围"
         data[overview_field] = overview
-        qualification = "\n".join(filter(None, (clean_html(detail.get("bidQualification")), clean_html(detail.get("consortiumQualification")))))
-        if not qualification:
-            qualification = _extract_section(text, ("投标人资格要求", "申请人资格要求", "资格要求"), ("招标文件的获取", "资格预审文件的获取", "文件的获取"))
-        data["申请人资格要求/投标人资格要求"] = qualification
+        main_qualification = clean_html(detail.get("bidQualification"))
+        if not main_qualification:
+            qualification_text = (
+                text.rsplit("现变更为", 1)[-1]
+                if "现变更为" in text
+                else text
+            )
+            main_qualification = _extract_section(
+                qualification_text,
+                ("投标人资格要求", "申请人资格要求", "资格要求"),
+                (
+                    "招标文件的获取", "招标文件获取", "资格预审文件的获取",
+                    "资格预审文件获取", "采购文件的获取", "采购文件获取",
+                    "文件的获取", "投标文件的递交", "投标文件递交",
+                    "提交投标文件", "监督部门", "联系方式", "其他公告内容",
+                ),
+            )
+        consortium = clean_html(detail.get("consortiumQualification"))
+        qualification_parts = [main_qualification] if main_qualification else []
+        if consortium and not any(
+            consortium in value or value in consortium for value in qualification_parts
+        ):
+            qualification_parts.append(consortium)
+        data["申请人资格要求/投标人资格要求"] = "\n".join(qualification_parts)
         data["预审文件获取时间"] = _format_range(detail.get("acquisitionStart"), detail.get("acquisitionEnd"))
         data["获取方式"] = _string(detail.get("acquisitionWay")) or _extract_acquisition_way(text)
         data["递交截止时间"] = _string(detail.get("submitDeadline"))
         data["递交方法"] = _string(detail.get("submitWay")) or _extract_label(text, ("递交方法", "递交方式"))
-        data["开启时间"] = _string(detail.get("submitDeadline"))
+        data["开启时间"] = _extract_label(text, ("开启时间",)) or _string(
+            detail.get("openingTime")
+        )
         data["开启方式"] = ({"1": "远程开启", "2": "非远程开启"} if prequalification else {"1": "远程开标", "2": "非远程开标"}).get(_code(detail.get("openWay")), "")
         data["开启地点"] = _extract_label(text, ("开标地点", "开标地址", "开启地点"))
         data["评审办法"] = _string(detail.get("evaluationMethod")) or _extract_label(text, ("评审办法", "评标办法"))

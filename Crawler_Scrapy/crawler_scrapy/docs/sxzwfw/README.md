@@ -59,16 +59,17 @@ Spider 名称为 `sxzwfw`。默认仍只采集工程建设六个栏目；另外�
 - 候选人—报价、中标人—中标价先构造成逐条明细，缺少某条报价时保留 `null`，不会
   让后续价格向前错位；兼容“第1名：公司，投标报价：金额”、中标人和中标价同一行，
   以及中标价格标签和值分行的写法；
-- 更正、终止、延期、答疑、控制价等细分类别写入“源站公告性质”。中标结果更正映射
-  到“更正结果公示”；终止、废标、流标、招标失败和撤销使用 `zzgg` 子类型，业务字段
-  复用招标公告 Schema，但导出编码为数据库统一使用的 `TERMINATION`。其他公告标题
-  未写“废标”时，正文明确出现“有效投标人不足三家”也按终止类识别；
+- 更正、终止、延期、答疑、控制价等细分类别保留在“源站公告性质”；这些公告统一映射
+  到 `更正结果公示/CORRECTION`，`公共类型`严格使用预设枚举。其他公告标题未写“废标”
+  时，正文明确出现“有效投标人不足三家”也映射为`废标公告`；
+- 只有明确出现“合同公告、合同签订、履约公告/验收”等公告语义才进入合同与履约，项目名
+  中的“第一合同段、合同包”不会再触发合同分类；
 
 工程建设公告子类型使用 `engineering.<源栏目>.<Schema子类型>`，例如：
 
 - `engineering.zbgg_zys.zbgg`：源站“招标/资审公告”，Schema 为招标公告；
-- `engineering.bg.zbgg`：源站“更正公告”，内容仍是招标公告的变更；
-- `engineering.qt.zzgg`：源站“其他公告”，实际为终止/废标类；
+- `engineering.bg.gzjg`：源站“更正公告”，Schema 为更正结果公示；
+- `engineering.qt.gzjg`：源站“其他公告”，实际为终止/废标类；
 - `engineering.gs.zbjg`：源站“中标结果公示”。
 
 这样既能按最后一段直接映射现有数据库公告类型，又不会丢失源站六种信息类型。
@@ -136,7 +137,7 @@ export CRAWLER_PYTHON_COMMAND=/home/vipuser/miniconda3/envs/myenv/bin/python
 输出采用框架现有的追加和版本去重逻辑：
 
 - JSON：`new_output/sxzwfw/json/`
-- CSV：`new_output/sxzwfw/csv/`
+- 正式运行不创建或更新 CSV；
 - HTML 快照：`new_output/sxzwfw/snapshots/`
 - 附件：`new_output/sxzwfw/attachments/`
 - 去重、JOBDIR 和续跑状态：`new_output/sxzwfw/state/`
@@ -145,12 +146,11 @@ export CRAWLER_PYTHON_COMMAND=/home/vipuser/miniconda3/envs/myenv/bin/python
 默认严格跳过已经成功导出的公告 ID；正文发生变化需要主动检查时使用
 `--check-updates`。相同日期窗口中断后重跑同一命令，会复用对应 `JOBDIR` 和持久化
 去重索引；已经导出的记录不重复，尚未完成的详情可以重新获取。附件每完成一个就同步
-回 JSON/CSV，已有完整文件直接跳过，`.part` 文件继续使用 HTTP Range 下载。
+回 JSON，已有完整文件直接跳过，`.part` 文件继续使用 HTTP Range 下载。
 
-每条 JSON 的 `_trace` 还会保存当前列表记录、列表 POST 表单、日期窗口、页码、总数、
-列表 HTML 的字节数与 SHA256、详情响应元数据，以及 CMS 附件元数据响应。完整详情 HTML
-仍由快照和 `_trace.rawHtml` 保存，正文由 `_trace.rawText` 保存；这些诊断内容不增加或修改
-数据库字段，导入时写入现有 MongoDB 溯源字段。
+每条 JSON 的 `_trace` 保存列表/详情请求元数据、解析元数据、爬虫版本、抽取版本和
+payload 快照引用。完整详情 HTML 只保存一份独立快照，正文保存在 JSON 顶层；导入时
+校验快照 SHA256 后写入现有 MongoDB 溯源字段，不增加或修改数据库字段。
 
 ## 离线验证
 
@@ -162,5 +162,6 @@ export CRAWLER_PYTHON_COMMAND=/home/vipuser/miniconda3/envs/myenv/bin/python
     tests/test_sxzwfw_exporter.py tests/test_sxzwfw_attachment_downloader.py -q
 ```
 
-规则提取无法确定的字段保持空值；可在人工抽样确认后选择性启用框架 AI 补空接口，AI
-不会覆盖已有规则值。批量历史采集脚本默认关闭 AI，避免不受控的模型调用和费用。
+规则提取无法确定的字段保持空值。当前已接入通用 C 方案混合 AI：规则证据充分的字段不调用
+模型；只有主要业务字段出现有标签未命中、HTML 残留、章节污染或名单/金额错位时才提交
+字段附近候选窗口，AI 可以基于更强正文证据纠正规则值，但不能覆盖源站可信元数据。

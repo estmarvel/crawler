@@ -86,21 +86,25 @@ def parse_page_info(value: bytes | str) -> tuple[int, int, int]:
 
 def classify_category(source_category: str, title: str) -> tuple[str, str]:
     compact = re.sub(r"\s+", "", str(title or ""))
-    if any(word in compact for word in ("废标", "流标", "终止", "撤销", "暂停")):
-        return "termination", "招标公告"
+    # 更正/终止类必须先于候选人、结果关键字判断，例如
+    # “中标候选人公示更正”不能继续写入候选人 Schema。
+    if any(
+        word in compact
+        for word in (
+            "更正", "变更", "延期", "控制价", "最高投标限价", "澄清",
+            "答疑", "补充", "废标", "流标", "终止", "撤销", "暂停",
+        )
+    ):
+        return "correction", "更正结果公示"
     if any(word in compact for word in ("中标候选人", "成交候选人")):
         return "candidate", "中标候选人公示"
     if any(word in compact for word in ("中标结果", "成交结果", "结果公告", "中标公告", "成交公告")):
         return "award", "中标结果公示"
-    if source_category == "change" and any(
-        word in compact for word in ("变更", "延期", "控制价", "澄清", "答疑", "补充")
-    ):
-        return "change", "招标公告"
     return "tender", "招标公告"
 
 
 class Trade365Parser(QianjiParser):
-    parser_version = "trade365-v3-field-audit"
+    parser_version = "trade365-v5-semantic-field-boundaries"
 
     @classmethod
     def parse(
@@ -130,8 +134,12 @@ class Trade365Parser(QianjiParser):
         project_type_name = config.PROJECT_TYPES[project_type][0]
         contacts = cls._contacts_365(raw_text)
 
-        if category in {"tender", "change", "termination"}:
-            data = cls._tender(raw_text, title, publish_time, contacts, project_type_name, category)
+        if category == "tender":
+            data = cls._tender(raw_text, title, publish_time, contacts, project_type_name)
+        elif category == "correction":
+            data = cls._correction(
+                raw_text, title, publish_time, contacts, project_type_name
+            )
         elif category == "candidate":
             data = cls._candidate(content_html, raw_text, title, publish_time, contacts, project_type_name)
         elif category == "award":
@@ -280,20 +288,139 @@ class Trade365Parser(QianjiParser):
 
     @staticmethod
     def _source_nature(title: str, category: str) -> str:
-        if category == "termination":
-            return next((word + "公告" for word in ("废标", "流标", "终止", "撤销", "暂停") if word in title), "终止公告")
-        if category == "change":
-            return next((word + "公告" for word in ("控制价", "延期", "澄清", "答疑", "补充", "变更") if word in title), "变更公告")
+        if category == "correction":
+            return Trade365Parser._correction_public_type(title)
         return "招标公告"
 
     @classmethod
-    def _tender(cls, text, title, publish_time, contacts, project_type, category):
+    def _project_location_365(cls, text: str) -> str:
+        """优先保存正文明确的履约地点，源站顶部行政地区只作兜底。"""
+
+        # 同一公告可能按标段给出多个建设/交货地点，不能只取第一个标段。
+        # 同时兼容“本工程位于……”这类没有冒号标签、但语义明确且通常比
+        # 页面顶部“招标项目所在地区”更精确的表达。
+        labels = (
+            "项目地点", "建设地点", "工程地址", "实施地点",
+            "服务地点", "交货地点", "供货地点",
+        )
+        candidates: list[str] = []
+        label_pattern = "|".join(re.escape(value) for value in labels)
+        for match in re.finditer(
+            rf"(?m)(?:^|\n)\s*(?:\d+(?:\.\d+)*[、.．]?\s*)?"
+            rf"(?:{label_pattern})\s*[：:]\s*([^\n；;]+)",
+            text,
+        ):
+            value = match.group(1).strip(" ：:。；;")
+            if value and value not in candidates:
+                candidates.append(value)
+        if candidates:
+            return "；".join(candidates)
+
+        for pattern in (
+            r"(?:项目建设地点位于|建设地点位于|本工程位于|本项目位于)\s*"
+            r"([^，,。；;\n]+)",
+        ):
+            if match := re.search(pattern, text):
+                value = match.group(1).strip(" ：:。；;")
+                if value:
+                    return value
+        return cls._fuzzy_label(text, "招标项目所在地区", "项目所在地")
+
+    @classmethod
+    def _scope_365(cls, text: str) -> str:
+        """只保留本次招标/采购内容，不把项目概况和后续字段整章写入。"""
+
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        labels = ("招标内容与范围", "招标范围", "采购需求", "采购内容", "招标内容")
+        start_index = -1
+        start_number = ""
+        first_value = ""
+        for index, line in enumerate(lines):
+            match = re.match(
+                r"^\s*(?P<number>\d+(?:\.\d+)*)?[、.．]?\s*"
+                rf"(?:{'|'.join(re.escape(value) for value in labels)})"
+                r"\s*[：:]\s*(?P<value>.*)$",
+                line,
+            )
+            if match:
+                start_index = index
+                start_number = match.group("number") or ""
+                first_value = match.group("value").strip()
+                break
+        if start_index < 0:
+            return ""
+
+        selected = [first_value] if first_value else []
+        start_parts = [int(value) for value in start_number.split(".") if value]
+        unrelated = re.compile(
+            r"^(?:项目名称|项目编号|项目规模|项目概况|建设地点|项目地点|"
+            r"服务地点|交货地点|供货地点|计划工期|工期|服务期|服务期限|"
+            r"交货期|供货期|质量要求|质量标准|资格审查方式)\s*[：:]"
+        )
+        major_boundary = re.compile(
+            r"^(?:[一二三四五六七八九十]+[、.．]|\d+[、.．])\s*"
+            r"(?:投标人|申请人|供应商|招标文件|采购文件|投标文件|响应文件|"
+            r"开标|发布公告|联系方式)"
+        )
+        for line in lines[start_index + 1 :]:
+            if major_boundary.match(line):
+                break
+            numbered = re.match(r"^(\d+(?:\.\d+)*)[、.．]?\s*", line)
+            if numbered and start_parts:
+                parts = [int(value) for value in numbered.group(1).split(".")]
+                if (
+                    len(parts) <= len(start_parts)
+                    and parts[0] > start_parts[0]
+                ) or (
+                    len(parts) == len(start_parts)
+                    and parts[:-1] == start_parts[:-1]
+                    and parts[-1] > start_parts[-1]
+                ):
+                    break
+            if unrelated.match(line):
+                continue
+            selected.append(line)
+        return "\n".join(value for value in selected if value).strip()
+
+    @staticmethod
+    def _operation_method_365(value: str) -> str:
+        """递交方法只保存上传、送达、邮寄等动作，清除地址和拒收说明。"""
+
+        result = str(value or "").strip()
+        result = re.split(
+            r"[，,；;。]\s*(?:逾期|未正常递交|电子交易平台不予受理|"
+            r"招标人不予受理|采购人不予受理)",
+            result,
+            maxsplit=1,
+        )[0].strip(" ，,；;。")
+        result = re.sub(r"(?:届时)[。；;]?\s*$", "", result).strip(" ，,；;。")
+        if result.startswith(("递交地址", "递交地点")):
+            return ""
+        if not re.search(r"(?:上传|递交|提交|送达|邮寄|现场交付)", result):
+            return ""
+        return result
+
+    @staticmethod
+    def _acquisition_method_365(value: str) -> str:
+        result = str(value or "").strip()
+        result = re.split(
+            r"(?:本项目)?(?:文件费|招标文件售价|采购文件售价)\s*(?:为|：|:)",
+            result,
+            maxsplit=1,
+        )[0].strip(" ，,；;。")
+        return result
+
+    @classmethod
+    def _tender(cls, text, title, publish_time, contacts, project_type):
         deadline = cls._datetime_value_365(cls._last_exact_label(
             text, "递交截止时间", "投标截止时间", "提交投标文件截止时间",
             "响应文件提交截止时间", "投标文件递交截止时间",
         ))
-        open_time = cls._datetime_value_365(cls._last_exact_label(text, "开标时间", "开启时间")) or deadline
-        amount = cls._control_price_365(text) if category == "change" and "控制价" in title else cls._last_fuzzy_label(
+        # 投标截止时间和开标/开启时间语义不同；源站未明示时保持为空。
+        open_time = cls._datetime_value_365(
+            cls._last_exact_label(text, "开标时间", "开启时间")
+        )
+        amount = cls._last_fuzzy_label(
             text, "最高投标限价", "预算金额", "招标金额"
         )
         total_investment = cls._fuzzy_label(text, "项目总投资", "估算金额", "投资估算")
@@ -305,9 +432,17 @@ class Trade365Parser(QianjiParser):
             total_investment = investment_match.group(1).strip() if investment_match else ""
         opening_place = cls._last_fuzzy_label(text, "开标地点", "开启地点", "递交地址")
         opening_place = re.split(r"[，,](?=逾期递交|逾期送达|未正常递交)", opening_place)[0].strip()
+        scope = cls._scope_365(text)
+        acquisition_method = cls._acquisition_method_365(
+            cls._last_fuzzy_label(text, "获取方法", "获取方式")
+        )
+        delivery_method = cls._operation_method_365(
+            cls._last_fuzzy_label(text, "递交方法", "递交方式")
+        )
         return {
-            "项目性质": "招标信息",
-            "源站公告性质": cls._source_nature(title, category),
+            # “招标信息”是栏目属性，不是项目性质；无依法/非依法证据时留空。
+            "项目性质": "",
+            "源站公告性质": cls._source_nature(title, "tender"),
             "项目名称": cls._project_name_365(text, title),
             "所属行业": cls._fuzzy_label(text, "所属行业"),
             "组织形式": "委托招标" if contacts.get("agency", {}).get("name") else "",
@@ -317,27 +452,102 @@ class Trade365Parser(QianjiParser):
             "项目总投资/估算金额": total_investment,
             "招标金额": amount,
             "资金来源": cls._funding_source_365(text),
-            "项目地点": cls._fuzzy_label(text, "招标项目所在地区", "项目所在地", "项目地点", "建设地点", "工程地址", "服务地点", "交货地点"),
+            "项目地点": cls._project_location_365(text),
             "招标人/采购人名称": contacts.get("owner", {}).get("name", ""),
             "项目规模": cls._fuzzy_label(text, "项目规模", "建设规模及内容", "建设规模"),
             "工期/服务期/供货日期": cls._fuzzy_label(text, "合同履行期限", "计划工期", "监理周期", "服务周期", "供货周期", "工期", "服务期限", "服务期", "交货期", "供货期"),
             "质量要求": cls._fuzzy_label(text, "质量要求", "质量标准"),
-            "招标内容与范围": cls._section(text, ("项目概况与招标范围", "项目概况", "招标内容与范围", "招标范围"), ("投标人资格要求", "申请人资格要求", "招标文件的获取")),
+            "招标内容与范围": scope,
             "申请人资格要求/投标人资格要求": cls._section(
                 text,
                 ("投标人资格要求", "申请人资格要求", "申请人的资格要求"),
                 ("招标文件的获取", "投标文件的递交", "获取招标文件"),
             ),
             "预审文件获取时间": cls._last_fuzzy_label(text, "获取时间", "招标文件获取时间", "文件发售时间"),
-            "获取方式": cls._last_fuzzy_label(text, "获取方法", "获取方式"),
+            "获取方式": acquisition_method,
             "递交截止时间": deadline,
-            "递交方法": cls._last_fuzzy_label(text, "递交方法", "递交方式"),
+            "递交方法": delivery_method,
             "开启时间": open_time,
             "开启方式": cls._last_fuzzy_label(text, "开标方式", "开启方式"),
             "开启地点": opening_place,
             "评审办法": cls._fuzzy_label(text, "评标办法", "评审办法"),
             "投标保证金方式": cls._guarantee_method(text),
             **cls._contact_fields_qianji({}, contacts, award=False),
+            "发布日期": publish_time,
+            "发布网站": config.PLATFORM_NAME,
+        }
+
+    @staticmethod
+    def _correction_public_type(title: str) -> str:
+        compact = re.sub(r"\s+", "", str(title or ""))
+        for keyword, public_type in (
+            ("废标", "废标公告"),
+            ("流标", "流标公告"),
+            ("终止", "终止公告"),
+            ("撤销", "撤销公告"),
+            ("暂停", "终止公告"),
+            ("延期", "延期公告"),
+            ("澄清", "澄清公告"),
+            ("答疑", "澄清公告"),
+            ("补充", "更正公告"),
+            ("变更", "变更公告"),
+            ("更正", "更正公告"),
+            ("控制价", "变更公告"),
+            ("最高投标限价", "变更公告"),
+        ):
+            if keyword in compact:
+                return public_type
+        return "其他"
+
+    @classmethod
+    def _correction_content_365(cls, text: str) -> str:
+        """只保留更正事项正文，排除标题编号、联系方式和签章页脚。"""
+
+        value = str(text or "").strip()
+        starts = list(re.finditer(
+            r"(?m)^\s*(?:[一二三四五六七八九十]+[、.]\s*)?"
+            r"(?:变更内容|更正内容|澄清内容|答疑内容|补充内容|终止内容|内容)\s*$",
+            value,
+        ))
+        if starts:
+            value = value[starts[0].end():]
+        end = re.search(
+            r"(?m)^\s*(?:[一二三四五六七八九十]+[、.]\s*)?"
+            r"(?:联系方式|联系事项|联系人及联系方式)\s*$",
+            value,
+        )
+        if end:
+            value = value[:end.start()]
+        signature = re.search(r"(?m)^\s*招标人或其招标代理机构", value)
+        if signature:
+            value = value[:signature.start()]
+        return value.strip()
+
+    @classmethod
+    def _correction(
+        cls, text, title, publish_time, contacts, project_type
+    ) -> dict[str, Any]:
+        supervision = cls._supervision_contacts_qianji(text)
+        return {
+            "公共类型": cls._correction_public_type(title),
+            "项目名称": cls._project_name_365(text, title),
+            # 工程/货物/服务是项目类型，不等同于所属行业。
+            "所属行业": cls._fuzzy_label(text, "所属行业", "行业分类"),
+            "组织形式": "委托招标" if contacts.get("agency", {}).get("name") else "",
+            # 取正文最后一个明确标签，适配“原时间/现变更为”模板。
+            "开标时间": cls._datetime_value_365(
+                cls._last_exact_label(text, "开标时间", "开启时间")
+            ),
+            "标书发售时间": cls._last_fuzzy_label(
+                text, "招标文件获取时间", "文件发售时间", "获取时间"
+            ),
+            "公告内容": cls._correction_content_365(text),
+            **cls._contact_fields_qianji({}, contacts, award=True),
+            "监督部门地址": supervision.get("address", ""),
+            "监督部门联系人": supervision.get("contact", ""),
+            "监督部门联系方式": supervision.get("phone", ""),
+            "依据文件": cls._fuzzy_label(text, "依据文件"),
+            "依据文号": cls._fuzzy_label(text, "依据文号", "批准文号"),
             "发布日期": publish_time,
             "发布网站": config.PLATFORM_NAME,
         }
@@ -370,7 +580,7 @@ class Trade365Parser(QianjiParser):
     def _candidate(cls, raw_html, text, title, publish_time, contacts, project_type):
         details = cls._candidate_table_details_365(raw_html) or cls._candidate_plain_details_365(text)
         return {
-            "项目性质": "招标信息",
+            "项目性质": "",
             "源站公告性质": "中标候选人公示",
             "项目名称": cls._project_name_365(text, title),
             "所属行业": project_type,
@@ -463,7 +673,7 @@ class Trade365Parser(QianjiParser):
             if details:
                 details[0]["中标人名称"] = leader
         return {
-            "项目性质": "招标信息",
+            "项目性质": "",
             "源站公告性质": "中标结果公示",
             "项目名称": cls._project_name_365(text, title),
             "所属行业": project_type,

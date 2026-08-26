@@ -23,6 +23,26 @@ def detail_html(title: str, body: str, extra: str = "") -> bytes:
 
 
 class SxzwfwParserTest(unittest.TestCase):
+    def test_correction_title_suffixes_do_not_pollute_project_name(self):
+        cases = {
+            "道路监理项目(1标段)重新招标控制价": "道路监理项目(1标段)",
+            "仓储项目总承包招标变更公告": "仓储项目总承包",
+            "道路工程施工二次延期公告": "道路工程施工",
+            "设备采购招标补充公告": "设备采购",
+            "配套设备采购货物流标公告": "配套设备采购货物",
+            "公路施工001标段 评标报告": "公路施工001标段",
+        }
+        for title, expected in cases.items():
+            with self.subTest(title=title):
+                page = detail_html(title, "<p>有效投标人不足三家。</p>")
+                parsed = SxzwfwParser.parse(
+                    "qt",
+                    page,
+                    {"notice_id": title},
+                    f"https://prec.sxzwfw.gov.cn/jyxxgcqt/{abs(hash(title))}.jhtml",
+                )
+                self.assertEqual(parsed.data["项目名称"], expected)
+
     def test_identifiers_prefer_transaction_project_code_and_drop_prose(self):
         page = detail_html(
             "产业园建设项目招标公告",
@@ -178,7 +198,7 @@ class SxzwfwParserTest(unittest.TestCase):
         self.assertEqual(parsed.data["开标时间"], datetime(2026, 8, 7, 9, 30))
         self.assertEqual(parsed.data["项目编号/招标编号"], "E1405000297A02989")
         self.assertEqual(parsed.data["资金来源"], "申请上级资金及南村镇政府统筹")
-        self.assertEqual(parsed.data["项目地点"], "晋城市.泽州县|晋城市")
+        self.assertEqual(parsed.data["项目地点"], "晋城市.泽州县")
         self.assertIn("本项目为农村人居环境整治项目", parsed.data["项目规模"])
         self.assertIn("配套健身器材 66 套等", parsed.data["项目规模"])
         self.assertEqual(
@@ -262,6 +282,61 @@ class SxzwfwParserTest(unittest.TestCase):
             [Decimal("1616600.00"), None, Decimal("1900000.00")],
         )
 
+    def test_award_table_separates_consortium_leader_member_and_price(self):
+        page = detail_html(
+            "高速公路咨询服务中标结果公示",
+            """
+            <p>一、中标人信息</p>
+            <table>
+              <tr><th>标段</th><th>中标人</th><th>中标价（元）</th></tr>
+              <tr><td>001标段</td><td>
+                <p>牵头人：山西省交通环境保护中心站（有限公司）</p>
+                <p>成员：山西同创坤宇泰科技有限公司</p>
+              </td><td>3758000</td></tr>
+            </table>
+            <p>二、其他公示内容</p>
+            """,
+        )
+        parsed = SxzwfwParser.parse(
+            "gs", page, {"notice_id": "award-consortium-table"},
+            "https://prec.sxzwfw.gov.cn/jyxxgcgs/award-consortium-table.jhtml",
+        )
+
+        self.assertEqual(
+            parsed.data["中标人名称"],
+            ["山西省交通环境保护中心站（有限公司）"],
+        )
+        self.assertEqual(
+            parsed.data["联合体成员"], ["山西同创坤宇泰科技有限公司"]
+        )
+        self.assertEqual(parsed.data["中标价"], [Decimal("3758000.00")])
+
+    def test_award_table_supports_consortium_unit_name_labels(self):
+        page = detail_html(
+            "加工项目EPC中标结果公示",
+            """
+            <table>
+              <tr><th>排序</th><th>中标人</th><th>中标价</th></tr>
+              <tr><td>1</td><td>牵头人单位名称:晋城市建工集团有限公司
+                联合体单位名称:中国医药集团联合工程有限公司</td>
+                <td>建安工程费(元)：265234200 设计费(元)：2780000</td></tr>
+            </table>
+            """,
+        )
+        parsed = SxzwfwParser.parse(
+            "gs", page, {"notice_id": "award-consortium-unit"},
+            "https://prec.sxzwfw.gov.cn/jyxxgcgs/award-consortium-unit.jhtml",
+        )
+
+        self.assertEqual(parsed.data["中标人名称"], ["晋城市建工集团有限公司"])
+        self.assertEqual(
+            parsed.data["联合体成员"], ["中国医药集团联合工程有限公司"]
+        )
+        self.assertEqual(
+            parsed.data["中标价"],
+            ["建安工程费(元)：265234200 设计费(元)：2780000"],
+        )
+
     def test_award_spaced_labels_are_extracted(self):
         page = detail_html(
             "节能改造项目中标结果公示",
@@ -332,7 +407,7 @@ class SxzwfwParserTest(unittest.TestCase):
         self.assertEqual(parsed_split.data["中标人名称"], ["山西机场建设有限公司"])
         self.assertEqual(parsed_split.data["中标价"], [Decimal("11836557.62")])
 
-    def test_other_termination_keeps_tender_schema_and_termination_subtype(self):
+    def test_other_termination_uses_correction_schema(self):
         page = detail_html(
             "某工程施工废标公告",
             "<p>因有效投标人不足三家，本项目废标。</p>",
@@ -342,7 +417,8 @@ class SxzwfwParserTest(unittest.TestCase):
             "https://prec.sxzwfw.gov.cn/jyxxgcyc/terminated.jhtml",
         )
 
-        self.assertEqual((parsed.subtype, parsed.notice_type), ("zzgg", "招标公告"))
+        self.assertEqual((parsed.subtype, parsed.notice_type), ("gzjg", "更正结果公示"))
+        self.assertEqual(parsed.data["公共类型"], "废标公告")
         self.assertIn("本项目废标", parsed.raw_text)
 
     def test_other_abnormal_notice_uses_body_to_detect_termination(self):
@@ -355,8 +431,50 @@ class SxzwfwParserTest(unittest.TestCase):
             "https://prec.sxzwfw.gov.cn/jyxxgcyc/abnormal.jhtml",
         )
 
-        self.assertEqual((parsed.subtype, parsed.notice_type), ("zzgg", "招标公告"))
-        self.assertTrue(parsed.data["源站公告性质"].startswith("异常（"))
+        self.assertEqual((parsed.subtype, parsed.notice_type), ("gzjg", "更正结果公示"))
+        self.assertEqual(parsed.data["公共类型"], "废标公告")
+        self.assertTrue(parsed.source_nature.startswith("异常（"))
+
+    def test_contract_segment_is_not_misclassified_as_contract_notice(self):
+        tender = SxzwfwParser.parse(
+            "zbgg_zys",
+            detail_html(
+                "道路工程第二合同段施工招标公告",
+                "<p>招标项目编号：E1401</p><p>一、招标内容与范围</p><p>道路施工。</p>",
+            ),
+            {"notice_id": "contract-segment"},
+            "https://prec.sxzwfw.gov.cn/jyxxgczb/contract-segment.jhtml",
+        )
+        plan = SxzwfwParser.parse(
+            "zbjh",
+            detail_html("绿色农田建设（国内合同包项目）", "<p>项目名称：绿色农田建设</p>"),
+            {"notice_id": "contract-package"},
+            "https://prec.sxzwfw.gov.cn/jyxxgcjh/contract-package.jhtml",
+        )
+        self.assertEqual((tender.subtype, tender.notice_type), ("zbgg", "招标公告"))
+        self.assertEqual((plan.subtype, plan.notice_type), ("zbjh", "招标计划"))
+
+    def test_control_price_and_withdrawal_use_correction_schema(self):
+        control = SxzwfwParser.parse(
+            "zbgg_zys",
+            detail_html(
+                "某工程招标控制价公示",
+                "<p>一、内容</p><p>招标控制总价：1000万元</p><p>二、联系方式</p>",
+            ),
+            {"notice_id": "control-price"},
+            "https://prec.sxzwfw.gov.cn/jyxxgczb/control-price.jhtml",
+        )
+        withdrawn = SxzwfwParser.parse(
+            "qt",
+            detail_html("某工程招标撤销（终止）公告", "<p>一、内容</p><p>本项目终止。</p>"),
+            {"notice_id": "withdrawn"},
+            "https://prec.sxzwfw.gov.cn/jyxxgcyc/withdrawn.jhtml",
+        )
+        self.assertEqual((control.subtype, control.notice_type), ("gzjg", "更正结果公示"))
+        self.assertEqual(control.data["公共类型"], "变更公告")
+        self.assertEqual(control.data["项目名称"], "某工程")
+        self.assertEqual(withdrawn.data["公共类型"], "撤销公告")
+        self.assertEqual(withdrawn.data["项目名称"], "某工程")
 
     def test_direct_and_cms_attachments_are_discovered(self):
         page = detail_html(
@@ -375,6 +493,25 @@ class SxzwfwParserTest(unittest.TestCase):
         self.assertEqual(parsed.attachments[1]["file_name"], "清单.xlsx")
         self.assertEqual(parsed.attachments[1]["parse_status"], "PENDING")
         self.assertEqual(parsed.cms_attachment["count"], 1)
+
+    def test_embedded_pdf_windows_path_is_normalized_without_losing_notice(self):
+        page = detail_html(
+            "道路工程招标公告",
+            '<iframe src="http://59.49.21.12:25006\\upload\\wj\\notice.pdf"></iframe>',
+        )
+        parsed = SxzwfwParser.parse(
+            "zbgg_zys",
+            page,
+            {"notice_id": "windows-pdf-path"},
+            "https://prec.sxzwfw.gov.cn/jyxxgczb/windows-pdf-path.jhtml",
+        )
+
+        self.assertEqual(len(parsed.attachments), 1)
+        self.assertEqual(
+            parsed.attachments[0]["file_url"],
+            "http://59.49.21.12:25006/upload/wj/notice.pdf",
+        )
+        self.assertTrue(parsed.attachments[0]["is_notice_body"])
 
     def test_hidden_nodes_do_not_pollute_visible_text(self):
         page = detail_html(
@@ -533,7 +670,7 @@ class SxzwfwParserTest(unittest.TestCase):
 
         self.assertEqual(
             parsed.data["中标候选人名称"],
-            ["001第一标段：甲建设有限公司", "001第一标段：乙建设有限公司"],
+            ["甲建设有限公司", "乙建设有限公司"],
         )
         self.assertEqual(
             parsed.data["中标候选人报价"],
@@ -543,7 +680,7 @@ class SxzwfwParserTest(unittest.TestCase):
             all(item["标段"] == "001第一标段" for item in parsed.data["中标候选人明细"])
         )
 
-    def test_candidate_visual_table_fallback_keeps_consortium_and_no_fake_price(self):
+    def test_candidate_correction_keeps_changed_names_in_correction_content(self):
         page = detail_html(
             "施工中标候选人更正公告",
             """
@@ -559,14 +696,40 @@ class SxzwfwParserTest(unittest.TestCase):
             "https://prec.sxzwfw.gov.cn/jyxxgcbg/candidate-visual.jhtml",
         )
 
-        self.assertEqual(
-            parsed.data["中标候选人名称"],
-            [
-                "甲集团有限公司（联合体牵头人）乙建设有限公司（联合体成员）",
-                "丙建设有限公司",
-            ],
+        self.assertEqual((parsed.subtype, parsed.notice_type), ("gzjg", "更正结果公示"))
+        self.assertEqual(parsed.data["公共类型"], "更正公告")
+        self.assertIn("甲集团有限公司", parsed.data["公告内容"])
+        self.assertIn("乙建设有限公司", parsed.data["公告内容"])
+        self.assertIn("丙建设有限公司", parsed.data["公告内容"])
+        self.assertNotIn("中标候选人名称", parsed.data)
+
+    def test_correction_content_and_broken_contact_lines_keep_semantic_boundaries(self):
+        page = detail_html(
+            "设备采购项目更正公告",
+            """
+            <p>一、内容</p><p>现将投标文件递交截止时间延期至2026年8月25日9时。</p>
+            <p>二、提出异议的渠道和方式</p><p>通过交易平台提出。</p>
+            <p>三、联系方式</p>
+            <p>招 标 人：甲有限公司</p>
+            <p>联 系 人：刘宁 电 话：18800001111 邮 箱：liuning@example.com</p>
+            <p>招标代理机构：乙招标有限公司</p>
+            <p>联 系 人：李婕</p><p>电</p><p>邮</p>
+            <p>话：0355-2222222</p><p>箱：lijie@example.com</p>
+            """,
         )
-        self.assertEqual(parsed.data["中标候选人报价"], [None, None])
+
+        parsed = SxzwfwParser.parse(
+            "bg", page, {"notice_id": "broken-contact-lines"},
+            "https://prec.sxzwfw.gov.cn/jyxxgcbg/broken-contact-lines.jhtml",
+        )
+
+        self.assertIn("延期至2026年8月25日9时", parsed.data["公告内容"])
+        self.assertNotIn("提出异议", parsed.data["公告内容"])
+        self.assertNotIn("联系方式", parsed.data["公告内容"])
+        self.assertEqual(parsed.data["招标人联系人"], "刘宁")
+        self.assertEqual(parsed.data["招标人联系方式"], "18800001111")
+        self.assertEqual(parsed.data["招标代理机构联系人"], "李婕")
+        self.assertEqual(parsed.data["招标代理机构联系方式"], "0355-2222222")
 
 
 if __name__ == "__main__":

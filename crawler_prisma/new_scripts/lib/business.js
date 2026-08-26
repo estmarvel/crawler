@@ -207,7 +207,9 @@ function mapBusinessRecord(record, options = {}) {
     projectName,
     normalizedProjectName: normalizeProjectName(projectName),
     fields: fieldMode === "project"
-      ? Object.fromEntries(Object.entries(source).filter(([key]) => PROJECT_FIELD_NAMES.has(key)))
+      ? Object.fromEntries(Object.entries(source).filter(([key]) => (
+        PROJECT_FIELD_NAMES.has(key)
+      )))
       : businessFields(source),
     content: includeContent
       ? nullableString(source["公告正文"] ?? source["公告内容"])
@@ -228,6 +230,10 @@ function mapBusinessRecord(record, options = {}) {
       32,
     ),
   };
+}
+
+function isBusinessReady(record) {
+  return (nullableString(record?.source?.["解析状态"]) || "PENDING").toUpperCase() === "PARSED";
 }
 
 function syntheticTenderCode(site, tenderCode) {
@@ -529,10 +535,18 @@ function buildBusinessDataset(loadedRecords, options = {}) {
 
 async function loadBusinessDataset(outputRoot, sites, options = {}) {
   const mapped = [];
+  let skippedNonParsedCount = 0;
   for await (const record of iterateJsonNotices(outputRoot, sites)) {
+    if (!isBusinessReady(record)) {
+      skippedNonParsedCount += 1;
+      continue;
+    }
     mapped.push(mapBusinessRecord(record, options));
   }
-  return buildMappedBusinessDataset(mapped);
+  return {
+    ...buildMappedBusinessDataset(mapped),
+    skippedNonParsedCount,
+  };
 }
 
 module.exports = {
@@ -545,6 +559,7 @@ module.exports = {
   buildProjectRows,
   businessFields,
   groupBusinessRecords,
+  isBusinessReady,
   deduplicateBusinessRecords,
   loadBusinessDataset,
   mapBusinessRecord,

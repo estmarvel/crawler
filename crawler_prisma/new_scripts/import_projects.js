@@ -15,9 +15,9 @@ function printHelp() {
 
 Options:
   --commit                 Upsert project rows.
-  --site=<site>            all, sxjm, sxzwfw, bitbid, huaxin, or jiubang.
+  --site=<site>            all or any configured crawler site.
   --output-root=<path>     Crawler new_output root.
-  --api-root=<path>        Project recommendation API directory.
+  --env-file=<path>        crawler_prisma environment file (default: .env).
   --help                   Show this help.
 
 Project identity priority:
@@ -102,12 +102,13 @@ async function main() {
   console.log(`Mode: ${options.commit ? "COMMIT" : "DRY RUN (no database writes)"}`);
   console.log(`Output root: ${options.outputRoot}`);
   console.log(`Validated notices: ${dataset.records.length}`);
+  console.log(`Non-PARSED notices kept only in raw/extraction storage: ${dataset.skippedNonParsedCount}`);
   console.log(`Duplicate notices skipped: ${dataset.duplicateCount}`);
   console.log(`Projects to upsert: ${dataset.projects.length}`);
   for (const [source, count] of [...sourceCounts].sort()) console.log(`  ${source}: ${count}`);
   if (!options.commit) return console.log("Dry run complete. Add --commit to upsert project rows.");
 
-  const stores = await openStores(options.apiRoot);
+  const stores = await openStores(options.envFile);
   try {
     await resolveDataSources(stores.prisma, options.sites);
     const result = await commitProjects(stores.prisma, dataset.projects);

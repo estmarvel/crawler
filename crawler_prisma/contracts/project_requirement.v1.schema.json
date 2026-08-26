@@ -1,0 +1,297 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://project-recommendation.local/contracts/project_requirement.v1.schema.json",
+  "title": "Project qualification requirement V1",
+  "type": "object",
+  "required": [
+    "requirementType",
+    "requirementSubtype",
+    "requirementText",
+    "keywords",
+    "structuredData",
+    "isMandatory",
+    "verificationStatus",
+    "effectiveStatus",
+    "contentHash"
+  ],
+  "properties": {
+    "requirementType": { "const": "QUALIFICATION" },
+    "requirementSubtype": {
+      "enum": [
+        "COMPANY_QUALIFICATION",
+        "COMPANY_LICENSE",
+        "COMPANY_CERTIFICATION",
+        "PERSONNEL_CERTIFICATE",
+        "PERFORMANCE",
+        "CREDIT",
+        "BASIC_CONDITION",
+        "CONSORTIUM",
+        "OTHER"
+      ]
+    },
+    "requirementText": { "type": "string", "minLength": 1 },
+    "keywords": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
+    "structuredData": { "$ref": "#/$defs/structuredData" },
+    "isMandatory": { "type": "boolean" },
+    "verificationStatus": { "enum": ["UNVERIFIED", "SYSTEM_VERIFIED", "MANUAL_VERIFIED", "REJECTED"] },
+    "effectiveStatus": { "enum": ["ACTIVE", "SUPERSEDED", "CANCELLED"] },
+    "contentHash": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "requirementSubtype": { "const": "COMPANY_QUALIFICATION" } } },
+      "then": { "properties": { "structuredData": { "$ref": "#/$defs/companyQualification" } } }
+    },
+    {
+      "if": { "properties": { "requirementSubtype": { "const": "COMPANY_LICENSE" } } },
+      "then": { "properties": { "structuredData": { "$ref": "#/$defs/companyLicense" } } }
+    },
+    {
+      "if": { "properties": { "requirementSubtype": { "const": "COMPANY_CERTIFICATION" } } },
+      "then": { "properties": { "structuredData": { "$ref": "#/$defs/companyCertification" } } }
+    },
+    {
+      "if": { "properties": { "requirementSubtype": { "const": "PERSONNEL_CERTIFICATE" } } },
+      "then": { "properties": { "structuredData": { "$ref": "#/$defs/personnelCertificate" } } }
+    },
+    {
+      "if": { "properties": { "requirementSubtype": { "const": "PERFORMANCE" } } },
+      "then": { "properties": { "structuredData": { "$ref": "#/$defs/performance" } } }
+    },
+    {
+      "if": { "properties": { "requirementSubtype": { "const": "CREDIT" } } },
+      "then": { "properties": { "structuredData": { "$ref": "#/$defs/credit" } } }
+    },
+    {
+      "if": { "properties": { "requirementSubtype": { "const": "BASIC_CONDITION" } } },
+      "then": { "properties": { "structuredData": { "$ref": "#/$defs/basicCondition" } } }
+    },
+    {
+      "if": { "properties": { "requirementSubtype": { "const": "CONSORTIUM" } } },
+      "then": { "properties": { "structuredData": { "$ref": "#/$defs/consortium" } } }
+    },
+    {
+      "if": { "properties": { "requirementSubtype": { "const": "OTHER" } } },
+      "then": { "properties": { "structuredData": { "$ref": "#/$defs/other" } } }
+    }
+  ],
+  "additionalProperties": false,
+  "$defs": {
+    "nullableString": { "type": ["string", "null"] },
+    "nullableNumber": { "type": ["number", "null"] },
+    "nullableInteger": { "type": ["integer", "null"] },
+    "nullableBoolean": { "type": ["boolean", "null"] },
+    "compare": { "enum": ["EXACT", "AT_LEAST", "AT_MOST", "ONE_OF", "EXISTS", "NOT_ALLOWED", "UNSPECIFIED"] },
+    "structuredData": {
+      "type": "object",
+      "required": ["schemaVersion", "subject", "rule", "logic", "scope", "validAt", "evidence", "extraction"],
+      "properties": {
+        "schemaVersion": { "const": "1.0" },
+        "subject": { "type": "string", "minLength": 1 },
+        "rule": { "type": "string", "minLength": 1 },
+        "logic": {
+          "type": "object",
+          "required": ["groupId", "operator"],
+          "properties": {
+            "groupId": { "$ref": "#/$defs/nullableString" },
+            "operator": { "enum": ["AND", "OR"] }
+          },
+          "additionalProperties": false
+        },
+        "scope": {
+          "type": "object",
+          "required": ["lotCodes"],
+          "properties": { "lotCodes": { "type": "array", "items": { "type": "string" } } },
+          "additionalProperties": false
+        },
+        "validAt": { "enum": ["CURRENT", "PUBLISH_DATE", "BID_DEADLINE", "OPENING_DATE", "CONTRACT_DATE", "UNSPECIFIED"] },
+        "evidence": {
+          "type": "object",
+          "required": ["quote"],
+          "properties": { "quote": { "type": "string", "minLength": 1 } },
+          "additionalProperties": false
+        },
+        "extraction": {
+          "type": "object",
+          "required": ["method", "model", "version", "confidence", "batchId"],
+          "properties": {
+            "method": { "enum": ["RULE", "RULE_QWEN", "QWEN", "MANUAL"] },
+            "model": { "$ref": "#/$defs/nullableString" },
+            "version": { "type": "string", "minLength": 1 },
+            "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+            "batchId": { "$ref": "#/$defs/nullableString" }
+          },
+          "additionalProperties": false
+        }
+      }
+    },
+    "companyQualification": {
+      "allOf": [
+        { "$ref": "#/$defs/structuredData" },
+        {
+          "required": ["name", "profession", "level", "compare", "issuingAuthority", "requiredScope"],
+          "properties": {
+            "name": { "$ref": "#/$defs/nullableString" },
+            "profession": { "$ref": "#/$defs/nullableString" },
+            "level": { "$ref": "#/$defs/nullableString" },
+            "compare": { "$ref": "#/$defs/compare" },
+            "issuingAuthority": { "$ref": "#/$defs/nullableString" },
+            "requiredScope": { "$ref": "#/$defs/nullableString" }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "companyLicense": {
+      "allOf": [
+        { "$ref": "#/$defs/structuredData" },
+        {
+          "required": ["name", "licenseCategory", "permittedScope", "level", "compare", "issuingAuthority"],
+          "properties": {
+            "name": { "$ref": "#/$defs/nullableString" },
+            "licenseCategory": { "$ref": "#/$defs/nullableString" },
+            "permittedScope": { "$ref": "#/$defs/nullableString" },
+            "level": { "$ref": "#/$defs/nullableString" },
+            "compare": { "$ref": "#/$defs/compare" },
+            "issuingAuthority": { "$ref": "#/$defs/nullableString" }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "companyCertification": {
+      "allOf": [
+        { "$ref": "#/$defs/structuredData" },
+        {
+          "required": ["name", "standardCode", "certificationScope", "level", "compare", "issuingAuthority"],
+          "properties": {
+            "name": { "$ref": "#/$defs/nullableString" },
+            "standardCode": { "$ref": "#/$defs/nullableString" },
+            "certificationScope": { "$ref": "#/$defs/nullableString" },
+            "level": { "$ref": "#/$defs/nullableString" },
+            "compare": { "$ref": "#/$defs/compare" },
+            "issuingAuthority": { "$ref": "#/$defs/nullableString" }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "personnelCertificate": {
+      "allOf": [
+        { "$ref": "#/$defs/structuredData" },
+        {
+          "required": ["role", "certificateName", "major", "level", "compare", "minimumCount", "registrationUnitRequired", "socialSecurityMonths", "noConcurrentProject", "titleName", "titleLevel"],
+          "properties": {
+            "role": { "$ref": "#/$defs/nullableString" },
+            "certificateName": { "$ref": "#/$defs/nullableString" },
+            "major": { "$ref": "#/$defs/nullableString" },
+            "level": { "$ref": "#/$defs/nullableString" },
+            "compare": { "$ref": "#/$defs/compare" },
+            "minimumCount": { "$ref": "#/$defs/nullableInteger" },
+            "registrationUnitRequired": { "$ref": "#/$defs/nullableBoolean" },
+            "socialSecurityMonths": { "$ref": "#/$defs/nullableInteger" },
+            "noConcurrentProject": { "$ref": "#/$defs/nullableBoolean" },
+            "titleName": { "$ref": "#/$defs/nullableString" },
+            "titleLevel": { "$ref": "#/$defs/nullableString" }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "performance": {
+      "allOf": [
+        { "$ref": "#/$defs/structuredData" },
+        {
+          "required": ["performanceOwner", "projectCategory", "projectKeywords", "withinYears", "dateFrom", "dateTo", "minimumCount", "minimumSingleAmount", "minimumTotalAmount", "currency", "completionRequired", "contractRequired", "region"],
+          "properties": {
+            "performanceOwner": { "enum": ["COMPANY", "PERSONNEL"] },
+            "projectCategory": { "$ref": "#/$defs/nullableString" },
+            "projectKeywords": { "type": "array", "items": { "type": "string" } },
+            "withinYears": { "$ref": "#/$defs/nullableInteger" },
+            "dateFrom": { "$ref": "#/$defs/nullableString" },
+            "dateTo": { "$ref": "#/$defs/nullableString" },
+            "minimumCount": { "$ref": "#/$defs/nullableInteger" },
+            "minimumSingleAmount": { "$ref": "#/$defs/nullableNumber" },
+            "minimumTotalAmount": { "$ref": "#/$defs/nullableNumber" },
+            "currency": { "$ref": "#/$defs/nullableString" },
+            "completionRequired": { "$ref": "#/$defs/nullableBoolean" },
+            "contractRequired": { "$ref": "#/$defs/nullableBoolean" },
+            "region": { "$ref": "#/$defs/nullableString" }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "credit": {
+      "allOf": [
+        { "$ref": "#/$defs/structuredData" },
+        {
+          "required": ["creditSubject", "platform", "restrictedList", "condition", "withinYears", "dateFrom", "dateTo"],
+          "properties": {
+            "creditSubject": { "enum": ["COMPANY", "PERSONNEL"] },
+            "platform": { "$ref": "#/$defs/nullableString" },
+            "restrictedList": { "$ref": "#/$defs/nullableString" },
+            "condition": { "enum": ["NOT_LISTED", "NO_RECORD", "NO_MAJOR_VIOLATION", "SATISFIES_LEVEL", "OTHER"] },
+            "withinYears": { "$ref": "#/$defs/nullableInteger" },
+            "dateFrom": { "$ref": "#/$defs/nullableString" },
+            "dateTo": { "$ref": "#/$defs/nullableString" }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "basicCondition": {
+      "allOf": [
+        { "$ref": "#/$defs/structuredData" },
+        {
+          "required": ["conditionCode", "name", "value", "unit", "compare", "minimumYears", "minimumAmount", "documentType"],
+          "properties": {
+            "conditionCode": { "enum": ["LEGAL_ENTITY", "BUSINESS_LICENSE", "BANK_ACCOUNT", "GENERAL_TAXPAYER", "FINANCIAL_STATUS", "TAX_PAYMENT", "SOCIAL_SECURITY", "EQUIPMENT", "MANUFACTURER_AUTHORIZATION", "SERVICE_AUTHORIZATION", "INDEPENDENT_RESPONSIBILITY", "RELATED_PARTY_RESTRICTION", "BID_LOT_RESTRICTION", "MANUFACTURER_STATUS", "PRODUCT_CERTIFICATION", "PRODUCT_TEST_REPORT", "PROFESSIONAL_ROSTER", "REGISTERED_CAPITAL", "INVOICE_CAPABILITY", "SUPPLY_CAPABILITY", "PERSONNEL_CAPACITY", "PERSONNEL_EMPLOYMENT", "VEHICLE_DOCUMENT", "STORAGE_CAPABILITY", "PRIOR_SERVICE_CONFLICT", "NO_SPECIAL_QUALIFICATION", "OTHER"] },
+            "name": { "$ref": "#/$defs/nullableString" },
+            "value": {},
+            "unit": { "$ref": "#/$defs/nullableString" },
+            "compare": { "$ref": "#/$defs/compare" },
+            "minimumYears": { "$ref": "#/$defs/nullableInteger" },
+            "minimumAmount": { "$ref": "#/$defs/nullableNumber" },
+            "documentType": { "$ref": "#/$defs/nullableString" }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "consortium": {
+      "allOf": [
+        { "$ref": "#/$defs/structuredData" },
+        {
+          "required": ["allowed", "maximumMembers", "leaderRequired", "leaderRole", "memberRoles", "agreementRequired", "jointLiabilityRequired", "memberRequirementTexts"],
+          "properties": {
+            "allowed": { "$ref": "#/$defs/nullableBoolean" },
+            "maximumMembers": { "$ref": "#/$defs/nullableInteger" },
+            "leaderRequired": { "$ref": "#/$defs/nullableBoolean" },
+            "leaderRole": { "$ref": "#/$defs/nullableString" },
+            "memberRoles": { "type": "array", "items": { "type": "string" } },
+            "agreementRequired": { "$ref": "#/$defs/nullableBoolean" },
+            "jointLiabilityRequired": { "$ref": "#/$defs/nullableBoolean" },
+            "memberRequirementTexts": { "type": "array", "items": { "type": "string" } }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "other": {
+      "allOf": [
+        { "$ref": "#/$defs/structuredData" },
+        {
+          "required": ["category", "description", "manualReviewRequired", "reviewReason"],
+          "properties": {
+            "category": { "type": "string", "minLength": 1 },
+            "description": { "$ref": "#/$defs/nullableString" },
+            "manualReviewRequired": { "type": "boolean" },
+            "reviewReason": { "$ref": "#/$defs/nullableString" }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    }
+  }
+}

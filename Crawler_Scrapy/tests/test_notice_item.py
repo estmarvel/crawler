@@ -12,6 +12,8 @@ from crawler_scrapy.schemas.notice_fields import (
     ANNOUNCEMENT_SCHEMAS,
     PARSER_DIAGNOSTIC_FIELDS,
     SYSTEM_FIELDS,
+    coerce_decimal_amount,
+    coerce_datetime,
 )
 
 
@@ -22,6 +24,25 @@ class ExampleNoticeSpider(BaseNoticeSpider):
 
 
 class NoticeItemDatabaseFieldsTest(unittest.TestCase):
+    def test_decimal_amount_uses_total_not_parenthetical_component(self):
+        self.assertEqual(
+            str(
+                coerce_decimal_amount(
+                    "约26834.47万元（其中建安费26554万元）"
+                )
+            ),
+            "268344700.00",
+        )
+
+    def test_decimal_amount_rejects_ambiguous_or_foreign_amounts(self):
+        self.assertIsNone(coerce_decimal_amount("甲标段100万元，乙标段200万元"))
+        self.assertIsNone(coerce_decimal_amount("合同金额100万美元"))
+
+    def test_datetime_accepts_chinese_whole_hour_without_minutes(self):
+        parsed = coerce_datetime("2026年7月30日9时")
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed.strftime("%Y-%m-%d %H:%M:%S"), "2026-07-30 09:00:00")
+
     def test_excel_required_field_contract_cannot_be_silently_deleted(self):
         # 项目爬取关键字段20260622.xlsx 的有序字段摘要。资格预审表中重复的
         # “招标代理机构”按 JSON 唯一键只计一次；扩展字段不参与摘要。

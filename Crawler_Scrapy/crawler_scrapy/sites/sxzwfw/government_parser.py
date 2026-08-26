@@ -19,6 +19,8 @@ from crawler_scrapy.sites.sxzwfw.parser import (
     ParsedNotice,
     _approval,
     _clean_project_name,
+    _correction_content,
+    _correction_public_type,
     _cms_attachment,
     _contacts,
     _direct_attachments,
@@ -273,7 +275,7 @@ def _corrected_event_time(text: str) -> str:
 class SxzwfwGovernmentProcurementParser:
     """把政府采购更正、结果 HTML 转换为框架预设公告字段。"""
 
-    parser_version = "sxzwfw-zfcg-v3-trace"
+    parser_version = "sxzwfw-zfcg-v5-embedded-pdf-body"
     extraction_model_name = "sxzwfw-zfcg-rule-parser"
     supported_sections = frozenset(config.GOVERNMENT_SECTION_CHANNELS)
 
@@ -284,12 +286,18 @@ class SxzwfwGovernmentProcurementParser:
         html_value: bytes | str,
         list_record: Mapping[str, Any],
         detail_url: str,
+        supplemental_text: str = "",
     ) -> ParsedNotice:
         if section not in cls.supported_sections:
             raise ValueError(f"政府采购解析器不支持栏目：{section}")
 
         document = _parse_document(html_value)
         raw_text = visible_content_text(html_value)
+        supplemental = str(supplemental_text or "").strip()
+        if supplemental:
+            raw_text = "\n".join(
+                value for value in (raw_text.strip(), supplemental) if value
+            )
         title = _first_text(document, ".cs_title_P1") or _string(list_record.get("title"))
         header = _first_text(document, ".cs_title_P3")
         publish_match = re.search(
@@ -310,9 +318,9 @@ class SxzwfwGovernmentProcurementParser:
         contacts = _contact_blocks(raw_text)
 
         if section == "zc_gz":
-            data["公共类型"] = source_nature
+            data["公共类型"] = _correction_public_type(title, raw_text)
             data["项目名称"] = project_name
-            data["公告内容"] = raw_text
+            data["公告内容"] = _correction_content(raw_text)
             data["开标时间"] = _corrected_event_time(raw_text)
             data["标书发售时间"] = _time_range(
                 raw_text,

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import csv
-import json
 from pathlib import Path
 
 from itemadapter import ItemAdapter
@@ -20,19 +19,29 @@ class SxjmMultiFormatPipeline(NoticeMultiFormatPipeline):
         "yfxm.zbgg": ("依法项目_招标（预审）公告", "招标公告"),
         "yfxm.hxr": ("依法项目_中标候选人公示", "中标候选人公示"),
         "yfxm.zbjg": ("依法项目_结果公告", "中标结果公示"),
-        "yfxm.zzgg": ("依法项目_终止公告", "招标公告"),
+        "yfxm.zzgg": ("依法项目_终止公告", "更正结果公示"),
         "zbxm.zbgg": ("招标项目_招标（预审）公告", "招标公告"),
         "zbxm.hxr": ("招标项目_中标候选人公示", "中标候选人公示"),
         "zbxm.zbjg": ("招标项目_中标公告", "中标结果公示"),
-        # 公共框架没有终止公告 Schema，因此复用招标公告字段结构。
-        "zbxm.zzgg": ("招标项目_终止公告", "招标公告"),
+        "zbxm.zzgg": ("招标项目_终止公告", "更正结果公示"),
         "fzxm.cggg": ("非招项目_采购（预审）公告", "招标公告"),
         "fzxm.cjhxr": ("非招项目_成交候选人公示", "中标候选人公示"),
         "fzxm.cjgg": ("非招项目_成交公告", "中标结果公示"),
-        "fzxm.zzgg": ("非招项目_终止公告", "招标公告"),
+        "fzxm.zzgg": ("非招项目_终止公告", "更正结果公示"),
         "jycg.cggg": ("简易采购限额以下_采购公告", "招标公告"),
-        "jycg.zzgg": ("简易采购限额以下_终止公告", "招标公告"),
+        "jycg.zzgg": ("简易采购限额以下_终止公告", "更正结果公示"),
         "jycg.cjgg": ("简易采购限额以下_成交公告", "中标结果公示"),
+    }
+    PREQUAL_ROUTES = {
+        "yfxm.zbgg": ("依法项目_资格预审公告", "资格预审公告"),
+        "zbxm.zbgg": ("招标项目_资格预审公告", "资格预审公告"),
+        "fzxm.cggg": ("非招项目_资格预审公告", "资格预审公告"),
+    }
+    CORRECTION_ROUTES = {
+        "yfxm.zbgg": ("依法项目_更正及其他公告", "更正结果公示"),
+        "zbxm.zbgg": ("招标项目_更正及其他公告", "更正结果公示"),
+        "fzxm.cggg": ("非招项目_更正及其他公告", "更正结果公示"),
+        "jycg.cggg": ("简易采购限额以下_更正及其他公告", "更正结果公示"),
     }
 
     @classmethod
@@ -41,18 +50,27 @@ class SxjmMultiFormatPipeline(NoticeMultiFormatPipeline):
 
     @classmethod
     def _route_config(cls, route: str) -> tuple[str, str]:
+        if route.startswith("__sxjm_prequalification_"):
+            subtype = route.removeprefix(
+                "__sxjm_prequalification_"
+            ).removesuffix("__")
+            try:
+                return cls.PREQUAL_ROUTES[subtype]
+            except KeyError as exc:
+                raise ValueError(
+                    f"未知山西焦煤资格预审导出路由：{route}"
+                ) from exc
+        if route.startswith("__sxjm_correction_"):
+            subtype = route.removeprefix("__sxjm_correction_").removesuffix("__")
+            try:
+                return cls.CORRECTION_ROUTES[subtype]
+            except KeyError as exc:
+                raise ValueError(f"未知山西焦煤更正类导出路由：{route}") from exc
         subtype = route.removeprefix("__sxjm_").removesuffix("__")
         try:
             return cls.ROUTES[subtype]
         except KeyError as exc:
             raise ValueError(f"未知山西焦煤导出路由：{route}") from exc
-
-    @staticmethod
-    def _is_termination(subtype: str, data: dict, title: str = "") -> bool:
-        nature = str(data.get("源站公告性质") or "")
-        return subtype.endswith(".zzgg") or any(
-            keyword in f"{nature} {title}" for keyword in ("终止", "撤销")
-        )
 
     def _fieldnames(self, notice_type: str) -> list[str]:
         _, schema_type = self._route_config(notice_type)
@@ -92,13 +110,7 @@ class SxjmMultiFormatPipeline(NoticeMultiFormatPipeline):
         basename, _ = self._route_config(notice_type)
         path = self.json_dir / f"{basename}.json"
         if path.exists() and path.stat().st_size > 0:
-            try:
-                rows = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, ValueError) as exc:
-                raise RuntimeError(f"现有JSON无法读取，拒绝覆盖：{path}: {exc}") from exc
-            if not isinstance(rows, list):
-                raise RuntimeError(f"现有JSON不是数组，拒绝覆盖：{path}")
-            has_records = bool(rows)
+            has_records, _ = self._inspect_json_array(path)
         else:
             path.write_text("[\n]\n", encoding="utf-8")
             has_records = False
@@ -112,29 +124,28 @@ class SxjmMultiFormatPipeline(NoticeMultiFormatPipeline):
         if subtype not in self.ROUTES:
             return super().process_item(item)
 
-        route = self._route(subtype)
-        _, schema_type = self.ROUTES[subtype]
         normalized_type = normalize_notice_type(adapter.get("notice_type"))
-        is_termination = self._is_termination(
-            subtype,
-            dict(adapter.get("data") or {}),
-            str(adapter.get("title") or ""),
-        )
-        if not is_termination and normalized_type != schema_type:
+        if normalized_type == "资格预审公告":
+            if subtype not in self.PREQUAL_ROUTES:
+                raise ValueError(
+                    f"公告子类型不支持资格预审Schema：subtype={subtype}"
+                )
+            route = f"__sxjm_prequalification_{subtype}__"
+            _, schema_type = self.PREQUAL_ROUTES[subtype]
+        elif normalized_type == "更正结果公示" and subtype in self.CORRECTION_ROUTES:
+            route = f"__sxjm_correction_{subtype}__"
+            _, schema_type = self.CORRECTION_ROUTES[subtype]
+        else:
+            route = self._route(subtype)
+            _, schema_type = self.ROUTES[subtype]
+        if normalized_type != schema_type:
             raise ValueError(
                 f"公告子类型与Schema不一致：subtype={subtype} type={normalized_type}"
             )
         record = self._build_record(adapter, schema_type)
-        if self.include_meta and is_termination:
-            record["公告类型"] = "TERMINATION"
         json_record = self._build_json_record(adapter, schema_type, record)
 
-        csv_writer = self._get_csv_writer(route)
-        self._get_json_path(route)
-        csv_row = {key: self._serialize_csv(value) for key, value in record.items()}
-        self._append_json_record(route, json_record)
-        csv_writer.writerow(csv_row)
-        self._csv_files[route].flush()
+        self._write_formats(route, record, json_record)
 
         field_meta = dict(adapter.get("field_meta") or {})
         dedup = field_meta.get("_dedup") or {}

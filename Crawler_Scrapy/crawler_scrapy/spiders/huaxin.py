@@ -19,6 +19,10 @@ import scrapy
 from scrapy import Request
 from scrapy.http import JsonRequest, Response
 
+from crawler_scrapy.ai.glm52_profile import (
+    GLM52_HYBRID_SETTINGS,
+    install_hybrid_pipeline,
+)
 from crawler_scrapy.sites.huaxin import config
 from crawler_scrapy.sites.huaxin.parser import HuaxinParser
 from crawler_scrapy.schemas.notice_fields import coerce_datetime
@@ -36,42 +40,67 @@ class HuaxinSpider(BaseNoticeSpider):
     allowed_domains = ["www.ygcgpt.com"]
     parser_version = parser_class.parser_version
     extraction_model_name = "huaxin-rule-parser"
+    ai_metadata_key = "huaxinHybridAi"
+    ai_trusted_fields_meta_key = "huaxinApiTrustedFields"
+    ai_log_name = "华新阳光"
 
-    # 结构化 API 已直接返回的字段不再交给 AI；只有规则解析后仍为空、且可能
-    # 出现在 annContent/annContent2 正文中的字段才进入公共 AI 接口。
+    # 不对所有非空字段无差别调用模型。规则为空但正文有明确标签、长章节越界、
+    # HTML/转义残留、角色冲突或名单报价错位时，公共 C 方案才会动态升级。
     ai_extract_fields = {
         "招标计划": (),
+        "资格预审公告": (),
+        "招标公告": (),
+        "中标候选人公示": (),
+        "中标结果公示": (),
+        "更正结果公示": (),
+    }
+    ai_sparse_review_fields = {}
+    ai_candidate_fields = {
+        "招标计划": (
+            "项目名称", "项目编号", "招标编号", "项目总投资", "招标内容",
+            "建设地点", "建设内容及规模", "招标人名称", "行政监督部门",
+        ),
         "资格预审公告": (
-            "项目总投资/估算金额", "招标金额", "资金来源",
-            "项目概况与招标范围", "申请人资格要求/投标人资格要求",
-            "获取方式", "递交方法", "开启地点", "评审办法",
-            "投标保证金方式", "招标人地址", "招标人联系人",
-            "招标人联系方式", "招标代理机构地址", "招标代理机构联系人",
-            "招标代理机构联系方式",
-        ),
-        "招标公告": (
-            "项目总投资/估算金额", "招标金额", "资金来源", "项目规模",
-            "工期/服务期/供货日期", "质量要求", "招标内容与范围",
+            "项目名称", "项目编号", "招标编号", "项目总投资/估算金额",
+            "招标金额", "资金来源", "项目地点", "项目概况与招标范围",
             "申请人资格要求/投标人资格要求", "获取方式", "递交方法",
-            "开启地点", "评审办法", "投标保证金方式", "招标人地址",
-            "招标人联系人", "招标人联系方式", "招标代理机构地址",
-            "招标代理机构联系人", "招标代理机构联系方式",
-        ),
-        "中标候选人公示": (
-            "开标时间", "中标候选人名称", "中标候选人报价",
-            "招标人地址", "招标人联系人", "招标人联系方式",
+            "开启地点", "评审办法", "投标保证金方式",
+            "招标人/采购人名称", "招标人地址", "招标人联系人",
+            "招标人联系方式", "招标代理机构",
             "招标代理机构地址", "招标代理机构联系人",
             "招标代理机构联系方式",
         ),
+        "招标公告": (
+            "项目名称", "项目编号", "招标编号", "项目总投资/估算金额",
+            "招标金额", "资金来源", "项目地点", "项目规模",
+            "工期/服务期/供货日期", "质量要求", "招标内容与范围",
+            "申请人资格要求/投标人资格要求", "获取方式", "递交方法",
+            "开启地点", "评审办法", "投标保证金方式",
+            "招标人/采购人名称", "招标人地址", "招标人联系人",
+            "招标人联系方式", "招标代理机构",
+            "招标代理机构地址", "招标代理机构联系人",
+            "招标代理机构联系方式",
+        ),
+        "中标候选人公示": (
+            "项目名称", "项目编号", "招标编号", "开标时间", "公示时间",
+            "中标候选人名称", "中标候选人报价", "招标人/采购人",
+            "招标人地址", "招标人联系人", "招标人联系方式",
+            "招标代理机构", "招标代理机构地址",
+            "招标代理机构联系人", "招标代理机构联系方式",
+        ),
         "中标结果公示": (
+            "项目名称", "项目编号", "招标编号", "中标人名称", "中标价",
             "联合体成员", "工期", "项目经理", "项目经理证书名称",
-            "项目经理证书编号", "招标人地址", "招标人联系人",
-            "招标人联系方式", "招标代理机构地址", "招标代理机构联系人",
+            "项目经理证书编号", "招标人/采购人", "招标人地址",
+            "招标人联系人", "招标人联系方式", "招标代理机构",
+            "招标代理机构地址", "招标代理机构联系人",
             "招标代理机构联系方式", "依据文件", "依据文号",
         ),
         "更正结果公示": (
-            "开标时间", "标书发售时间", "公告内容", "招标人地址",
-            "招标人联系人", "招标人联系方式", "招标代理机构地址",
+            "项目名称", "项目编号", "招标编号", "开标时间",
+            "标书发售时间", "公告内容", "招标人地址",
+            "招标人联系人", "招标人联系方式",
+            "招标代理机构", "招标代理机构地址",
             "招标代理机构联系人", "招标代理机构联系方式",
             "监督部门地址", "监督部门联系人", "监督部门联系方式",
             "依据文件", "依据文号",
@@ -79,15 +108,16 @@ class HuaxinSpider(BaseNoticeSpider):
     }
 
     custom_settings = {
+        **GLM52_HYBRID_SETTINGS,
         # API 位于独立端口，目标站 robots 文件不能表达该 JSON 接口的规则；
         # 只对本 Spider 关闭，其他站点继续使用全局配置。
         "ROBOTSTXT_OBEY": False,
         "CONCURRENT_REQUESTS_PER_DOMAIN": 4,
         "DOWNLOAD_DELAY": 0.3,
         "AUTOTHROTTLE_TARGET_CONCURRENCY": 2.0,
-        # 华新详情由结构化 API 返回；不再保存 HTML 快照。招标计划本身没有
-        # raw_html，关闭后也不会产生误导性的快照缺失警告。
-        "NOTICE_SNAPSHOT_ENABLED": False,
+        # annContent 是源站详情 API 实际展示的 HTML；独立保存快照用于字段
+        # 复核和问题溯源。没有正文的招标计划仍保留原始 JSON payload。
+        "NOTICE_SNAPSHOT_ENABLED": True,
         "NOTICE_SNAPSHOT_REQUIRED": False,
         # AI 开启时允许它补充华新映射中明确列出的可选业务字段。
         "NOTICE_AI_INCLUDE_OPTIONAL_FIELDS": True,
@@ -107,6 +137,7 @@ class HuaxinSpider(BaseNoticeSpider):
         """选择受保护直连、固定代理或天启代理出口。"""
 
         super().update_settings(settings)
+        install_hybrid_pipeline(settings)
         mode = str(settings.get("CRAWLER_OUTBOUND_MODE", "direct")).strip().lower()
         if mode == "tianqi":
             return
@@ -792,6 +823,104 @@ class HuaxinSpider(BaseNoticeSpider):
             if key not in target or target[key] in (None, "", [], {}):
                 target[key] = value
 
+    @classmethod
+    def _api_trusted_fields(
+        cls,
+        notice_type: str,
+        detail: Mapping[str, Any],
+        data: Mapping[str, Any],
+    ) -> list[str]:
+        """Return fields backed by structured API values, not inferred body text.
+
+        The hybrid AI pipeline may review body-derived values, but it must not
+        rewrite authoritative API values.  The list is intentionally generated
+        per item: an absent API key is never treated as trusted merely because
+        the site normally exposes that field.
+        """
+
+        trusted: list[str] = []
+
+        def has_value(value: Any) -> bool:
+            return value not in (None, "", [], {})
+
+        def add(field: str, *source_keys: str, always: bool = False) -> None:
+            if not has_value(data.get(field)):
+                return
+            if always or any(has_value(detail.get(key)) for key in source_keys):
+                trusted.append(field)
+
+        add("发布日期", "releaseTime", "createTime")
+        # 发布网站是站点身份字段；mediaName 缺失时使用 platform_name 仍是
+        # 确定值，而不是从公告正文推断出的值。
+        add("发布网站", always=True)
+        add(
+            "项目性质",
+            "projectNatureName",
+            "projectPropertyName",
+        )
+        add("所属行业", "industryName")
+
+        if notice_type == "招标计划":
+            for field, source_keys in (
+                ("招标方式", ("tenderMode",)),
+                ("项目名称", ("projectName", "planTitle")),
+                ("项目类型", ("projectType",)),
+                ("项目总投资", ("contributionScale",)),
+                ("招标内容", ("tenderContent",)),
+                ("招标人名称", ("legalPerson",)),
+                ("行政监督部门", ("superviseDeptName",)),
+                ("建设地点", ("projectAddress",)),
+                ("建设内容及规模", ("projectScale",)),
+                (
+                    "招标公告（资格预审公告）预计发布时间",
+                    ("noticePlanSendTime",),
+                ),
+            ):
+                add(field, *source_keys)
+
+        if notice_type in {"资格预审公告", "招标公告"}:
+            for field, source_keys in (
+                ("项目类型/行业分类", ("classificationName", "industryName")),
+                ("预审文件获取时间", ("acquisitionStart", "acquisitionEnd")),
+                ("获取方式", ("acquisitionWay",)),
+                ("递交截止时间", ("submitDeadline",)),
+                ("递交方法", ("submitWay",)),
+                ("开启时间", ("openingTime",)),
+                ("开启方式", ("openWay",)),
+                ("评审办法", ("evaluationMethod",)),
+                ("投标保证金方式", ("ensureForm",)),
+            ):
+                add(field, *source_keys)
+
+        if notice_type == "中标候选人公示":
+            add("公示时间", "publicityStart", "publicityEnd")
+            if has_value(detail.get("bidAnnCandidateDOS")) or has_value(
+                detail.get("candidateDOS")
+            ):
+                add("中标候选人名称", always=True)
+                add("中标候选人报价", always=True)
+
+        if notice_type == "中标结果公示":
+            add("招标方式", "announcementType")
+            if has_value(detail.get("bidAnnDealDOS")):
+                add("中标人名称", always=True)
+                add("中标价", always=True)
+
+        # 招标人/代理机构名称仅在正文联系方式没有覆盖、最终值确实等于
+        # API 兜底值时锁定；避免把集团归属单位误当作公告联系人单位。
+        role_fields = (
+            ("招标人/采购人名称", "bidName"),
+            ("招标人/采购人", "bidName"),
+            ("招标代理机构", "companyName"),
+        )
+        for field, source_key in role_fields:
+            field_value = str(data.get(field) or "").strip()
+            source_value = str(detail.get(source_key) or "").strip()
+            if field_value and source_value and field_value == source_value:
+                trusted.append(field)
+
+        return list(dict.fromkeys(trusted))
+
     def _build_item(
         self,
         section: str,
@@ -829,6 +958,7 @@ class HuaxinSpider(BaseNoticeSpider):
                 detail_response_metadata["relatedRequests"] = [dict(related)]
         if detail_envelope:
             detail_response_metadata["businessEnvelope"] = dict(detail_envelope)
+        api_trusted_fields = self._api_trusted_fields(notice_type, detail, data)
         return self.build_notice_item(
             notice_type=notice_type,
             notice_subtype=subtype,
@@ -845,10 +975,6 @@ class HuaxinSpider(BaseNoticeSpider):
                     if not str(key).startswith("_crawler_")
                 },
                 "detail": dict(source_detail or detail),
-                "transport": {
-                    "list": dict(list_trace) if isinstance(list_trace, Mapping) else None,
-                    "detailEnvelope": dict(detail_envelope or {}),
-                },
             },
             raw_html=self.parser_class.raw_html(detail),
             raw_text=self.parser_class.raw_text(detail),
@@ -856,7 +982,11 @@ class HuaxinSpider(BaseNoticeSpider):
             extraction_model=self.extraction_model_name,
             extraction_version=self.parser_version,
             is_verified=False,
-            field_meta={"site_parser": self.parser_version, "detail_source": source},
+            field_meta={
+                "site_parser": self.parser_version,
+                "detail_source": source,
+                self.ai_trusted_fields_meta_key: api_trusted_fields,
+            },
             response_metadata=detail_response_metadata,
             source_list_fingerprint=str(
                 detail.get("_crawler_list_fingerprint") or ""

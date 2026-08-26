@@ -1,6 +1,12 @@
+import hashlib
+from types import SimpleNamespace
+
+from scrapy.settings import Settings
+
 from crawler_scrapy.sites.sxbid import config
 from crawler_scrapy.sites.sxbid.exporter import SxbidMultiFormatPipeline
 from crawler_scrapy.sites.sxbid.parser import (
+    ParsedPage,
     SxbidParser,
     parse_detail_page,
     parse_list_records,
@@ -337,3 +343,188 @@ def test_sxbid_dual_project_labels_are_mapped_to_project_and_tender_ids():
     )
     assert parsed.data["项目编号"] == "D3201150734fdpsb1v19"
     assert parsed.data["招标编号"] == "ZLZX招【2026】0487号"
+
+
+def test_sxbid_internal_chain_and_list_region_do_not_become_business_fields():
+    html = _detail(
+        "设备采购招标公告",
+        "<script>fetch('/getRelatedContent/1/internal-chain-123')</script>",
+    ).replace("<b>实施地：</b></td><td>太原市", "<b>实施地：</b></td><td>")
+    page = parse_detail_page(html)
+    parsed = SxbidParser.parse(
+        "tender",
+        page,
+        list_record={"region": "太原市", "project_type": "货物"},
+        pdf_text="招标内容与范围：采购设备。",
+    )
+    assert page.project_chain_id == "internal-chain-123"
+    assert parsed.data["项目编号"] == ""
+    assert parsed.data["项目地点"] == ""
+
+
+def test_sxbid_submission_address_is_not_opening_place():
+    page = parse_detail_page(_detail("道路工程招标公告", ""))
+    parsed = SxbidParser.parse(
+        "tender",
+        page,
+        pdf_text="递交地址：太原市交易中心\n递交方法：现场递交",
+    )
+    assert parsed.data["开启地点"] == ""
+    assert parsed.data["递交方法"] == "现场递交"
+
+
+def test_sxbid_plan_notice_type_is_not_project_nature():
+    html = """<div class='page_panel noticeInfoDiv'><div class='page_name'>建设项目招标计划</div>
+    <div class='page_content'><table><tr><td><b>项目名称：</b></td><td>建设项目</td></tr>
+    </table></div></div>"""
+    parsed = SxbidParser.parse("plan", parse_detail_page(html))
+    assert parsed.data["项目性质"] == ""
+
+
+def test_sxbid_acquisition_method_stops_at_fullwidth_numbered_heading():
+    text = """4．资格预审文件的获取
+获取方式：登录公共资源平台免费下载获取资格预审文件及其他资料。
+5．资格预审申请文件的递交
+递交截止时间：2024年10月24日09时30分
+递交方法：现场递交
+递交地址：太原市为民服务中心"""
+    assert SxbidParser._paragraph_label(text, "获取方式") == (
+        "登录公共资源平台免费下载获取资格预审文件及其他资料。"
+    )
+
+
+def test_sxbid_body_pdf_is_cached_during_notice_phase(tmp_path):
+    content = b"%PDF-1.4\nbody\n%%EOF"
+    attachment = {
+        "source_file_id": "body-1",
+        "file_name": "notice.pdf",
+        "file_url": "https://www.sxbid.com.cn/f/download?body-1",
+    }
+    page = ParsedPage(
+        title="测试公告",
+        publish_time="2026-08-19",
+        source_name="",
+        raw_text="",
+        content_html="",
+        headers={},
+        body_pdf_url=attachment["file_url"],
+        attachments=[attachment],
+        project_chain_id="",
+    )
+    spider = SxbidSpider(categories="award", max_records=1)
+    spider.crawler = SimpleNamespace(
+        settings=Settings({"NOTICE_OUTPUT_ROOT": str(tmp_path)})
+    )
+    relative = spider._cache_body_pdf(
+        category="award",
+        list_record={"id": "notice-1"},
+        page=page,
+        content=content,
+        text_extracted=True,
+    )
+    target = tmp_path / relative
+    assert target.read_bytes() == content
+    assert attachment["storage_path"] == relative
+    assert attachment["file_hash"] == hashlib.md5(
+        content, usedforsecurity=False
+    ).hexdigest()
+    assert attachment["parse_status"] == "TEXT_EXTRACTED"
+
+
+def test_sxbid_quota_is_seeded_from_existing_json_after_restart(tmp_path):
+    json_dir = tmp_path / "sxbid" / "json"
+    json_dir.mkdir(parents=True)
+    (json_dir / "award.json").write_text(
+        '[{"公告子类型":"award"},{"公告子类型":"award"}]',
+        encoding="utf-8",
+    )
+    spider = SxbidSpider(categories="award", max_records=2)
+    spider.crawler = SimpleNamespace(
+        settings=Settings({"NOTICE_OUTPUT_ROOT": str(tmp_path)})
+    )
+    spider._load_existing_counts()
+    assert spider._counts["award"] == 2
+    assert spider._emitted_counts["award"] == 2
+    assert spider._reserve_output_slot("award") is False
+
+
+def test_sxbid_real_pdf_wrapped_consortium_name_keeps_percent_unit():
+    text = """中标候选人基本情况
+投标报价（%）
+太原市市政工程设计研究
+1 院;中铁工程设计咨询集团 80 合格
+有限公司
+2 同济大学建筑设计研究院（集团）有限公司 80 合格
+中标候选人按照招标文件要求承诺的项目负责人情况"""
+    rows = SxbidParser._ranked_candidate_details(text, final=False)
+    assert rows[0]["候选人名称"] == (
+        "太原市市政工程设计研究院;中铁工程设计咨询集团有限公司"
+    )
+    assert rows[0]["候选人报价"] == "80%"
+
+
+def test_sxbid_real_award_sentence_contacts_and_nested_suffix_are_cleaned():
+    text = """招标人：洪洞县政府工程建设服务中心
+地址：洪洞县住建局南院二层
+联系人：张立玮
+电话：13623437171
+电子邮箱：owner@example.com
+招标代理机构：山西可名工程项目管理有限公司
+地 址：科技街3号
+联 系 人：张力登
+电 话：15386873113
+电 子 邮 箱：agency@example.com
+招标方式：公开招标
+招标人确定山西路桥市政工程有限公司（联合体牵头人）、
+山西省安装集团股份有限公司（联合体成员）为该项目的中标人。
+中标价：21536.7350万元"""
+    contacts = SxbidParser._contacts(text)
+    rows, consortium = SxbidParser._award_details_sxbid(text)
+    assert contacts["agency"]["phone"] == "15386873113"
+    assert rows[0]["中标人名称"] == "山西路桥市政工程有限公司"
+    assert rows[0]["中标价"] == "21536.7350万元"
+    assert consortium == ["山西省安装集团股份有限公司"]
+    assert SxbidParser._project_name_sxbid(
+        {}, "道路工程招标公告二次延期公告", text
+    ) == "道路工程"
+
+
+def test_sxbid_contact_parser_ignores_inline_objection_roles():
+    text = """接收异议的联系人: 招标人：程智新；招标代理机构：刘斌
+电 话: 招标人：18734883595；招标代理机构：18234042738
+十一、联系方式
+招 标 人: 静乐县恒源新能源有限公司
+联 系 人: 程智新
+电 话: 18734883595
+招标代理机构: 山西安盛达项目管理有限公司
+联 系 人: 刘斌
+电 话: 18234042738
+招标人或招标代理机构主要负责人: （签章）"""
+    contacts = SxbidParser._contacts(text)
+    assert contacts["owner"]["name"] == "静乐县恒源新能源有限公司"
+    assert contacts["agency"]["name"] == "山西安盛达项目管理有限公司"
+    assert contacts["agency"]["phone"] == "18234042738"
+
+
+def test_sxbid_award_accepts_explicit_unit_and_name_labels():
+    rows, _ = SxbidParser._award_details_sxbid(
+        "开标方式：网上开标\n中标单位：山西八建集团有限公司\n"
+        "中标价：607.166600 万元\n项目经理：武泽宇"
+    )
+    assert rows == [{
+        "标段": "",
+        "中标人名称": "山西八建集团有限公司",
+        "中标价": "607.166600 万元",
+    }]
+    rows, _ = SxbidParser._award_details_sxbid(
+        "中标人名称 中化二建集团有限公司\n中标价格 10238.093639万元"
+    )
+    assert rows[0]["中标人名称"] == "中化二建集团有限公司"
+    assert rows[0]["中标价"] == "10238.093639万元"
+    rows, _ = SxbidParser._award_details_sxbid(
+        "公示期结束后由招标人确定永和县兴达工程服务队为隰县经济林"
+        "提质增效项目(6标段)的\n中标人，现予以公示。\n"
+        "投标报价：178.518192万元"
+    )
+    assert rows[0]["中标人名称"] == "永和县兴达工程服务队"
+    assert rows[0]["中标价"] == "178.518192万元"

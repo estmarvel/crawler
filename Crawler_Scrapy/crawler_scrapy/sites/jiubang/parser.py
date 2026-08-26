@@ -12,6 +12,24 @@ from crawler_scrapy.sites.jiubang.config import PLATFORM_NAME, WEB_BASE_URL
 class JiubangParser(HuaxinParser):
     """把玖邦 TWS 详情 JSON 转换为框架统一的八类公告字段。"""
 
-    parser_version = "jiubang-v7-identifiers"
+    parser_version = "jiubang-v10-correction-title-routing"
     platform_name = PLATFORM_NAME
     web_base_url = WEB_BASE_URL
+
+    @classmethod
+    def detect_subtype(cls, section, detail):
+        """玖邦把延期等修订公告混放在招标公告栏目，需按标题纠正。"""
+
+        title = str(detail.get("annTitle") or detail.get("annLastTitle") or "")
+        correction_words = (
+            "变更公告",
+            "更正公告",
+            "延期公告",
+            "澄清公告",
+            "终止公告",
+            "撤销公告",
+            "中止公告",
+        )
+        if section == "zbgg_zys" and any(word in title for word in correction_words):
+            return "gzjg"
+        return super().detect_subtype(section, detail)

@@ -222,8 +222,8 @@ class HuaxinSpiderRequestTest(unittest.TestCase):
         )
         self.assertEqual(published, datetime(2026, 6, 1, 12, 0, 0))
 
-    def test_huaxin_disables_snapshots_but_keeps_attachment_downloads(self):
-        self.assertIs(HuaxinSpider.custom_settings["NOTICE_SNAPSHOT_ENABLED"], False)
+    def test_huaxin_keeps_snapshots_and_attachment_downloads_for_traceability(self):
+        self.assertIs(HuaxinSpider.custom_settings["NOTICE_SNAPSHOT_ENABLED"], True)
         self.assertIs(
             HuaxinSpider.custom_settings["NOTICE_ATTACHMENT_DOWNLOAD_ENABLED"],
             True,
@@ -374,6 +374,66 @@ class HuaxinSpiderRequestTest(unittest.TestCase):
         self.assertEqual(attachment["file_size_bytes"], 1024)
         self.assertEqual(attachment["parse_status"], "DOWNLOADED_NO_OCR")
         self.assertNotIn("附件", result["data"])
+
+    def test_attachment_download_result_maps_to_original_attachment_index(self):
+        class Stats:
+            def inc_value(self, key):
+                pass
+
+        pipeline = NoticeFilesPipeline.__new__(NoticeFilesPipeline)
+        pipeline.enabled = True
+        pipeline.files_urls_field = "file_urls"
+        pipeline.files_result_field = "files"
+        pipeline.attachment_download_timeout = 600.0
+        pipeline.attachment_retry_times = 2
+        pipeline.crawler = SimpleNamespace(stats=Stats())
+        item = NoticeItem(
+            platform_code="huaxin",
+            notice_type="招标公告",
+            notice_id="mixed-1",
+            detail_url="https://www.ygcgpt.com/detail/mixed-1",
+            data={},
+            attachments=[
+                {
+                    "source_file_id": "metadata-only",
+                    "file_name": "仅元数据附件.pdf",
+                    "file_url": None,
+                    "parse_status": "PENDING",
+                },
+                {
+                    "source_file_id": "downloadable",
+                    "file_name": "可下载附件.pdf",
+                    "file_url": "https://files.example.test/downloadable",
+                    "parse_status": "URL_RESOLVED",
+                },
+            ],
+            file_urls=["https://files.example.test/downloadable"],
+        )
+
+        request = pipeline.get_media_requests(item, None)[0]
+        self.assertEqual(request.meta["_notice_attachment_index"], 1)
+        self.assertIn(
+            "downloadable_可下载附件.pdf",
+            pipeline.file_path(request, item=item),
+        )
+
+        result = pipeline.item_completed(
+            [(True, {
+                "url": request.url,
+                "path": "huaxin/attachments/招标公告/mixed-1/downloadable_可下载附件.pdf",
+                "checksum": "b" * 32,
+                "status": "downloaded",
+                "file_size_bytes": 2048,
+                "file_type": "application/pdf",
+            })],
+            item,
+            None,
+        )
+        self.assertIsNone(result["attachments"][0].get("storage_path"))
+        self.assertEqual(
+            result["attachments"][1]["storage_path"],
+            "huaxin/attachments/招标公告/mixed-1/downloadable_可下载附件.pdf",
+        )
 
 
 if __name__ == "__main__":

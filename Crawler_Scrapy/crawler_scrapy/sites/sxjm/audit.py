@@ -9,6 +9,11 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from crawler_scrapy.sites.sxjm import config
+from crawler_scrapy.sites.sxjm.parser import SxjmParser
+from crawler_scrapy.storage.source_snapshots import (
+    load_record_html,
+    load_record_payload,
+)
 
 
 SCHEMA_CODES = {
@@ -16,6 +21,7 @@ SCHEMA_CODES = {
     "招标公告": "TENDER",
     "中标候选人公示": "CANDIDATE",
     "中标结果公示": "AWARD",
+    "更正结果公示": "CORRECTION",
 }
 
 
@@ -33,7 +39,11 @@ def _title_is_termination(title: str) -> bool:
     return any(keyword in title for keyword in ("终止", "撤销"))
 
 
-def audit_record(record: Mapping[str, Any], file_name: str) -> dict[str, Any]:
+def audit_record(
+    record: Mapping[str, Any],
+    file_name: str,
+    output_root: Path | None = None,
+) -> dict[str, Any]:
     errors: list[str] = []
     warnings: list[str] = []
     subtype = _text(record.get("公告子类型"))
@@ -43,30 +53,40 @@ def audit_record(record: Mapping[str, Any], file_name: str) -> dict[str, Any]:
     field_meta = (
         trace.get("fieldMeta") if isinstance(trace.get("fieldMeta"), Mapping) else {}
     )
-    payload = trace.get("payload") if isinstance(trace.get("payload"), Mapping) else {}
+    payload = (
+        load_record_payload(record, output_root)
+        if output_root is not None
+        else trace.get("payload")
+    )
+    payload = payload if isinstance(payload, Mapping) else {}
     detail = payload.get("detail") if isinstance(payload.get("detail"), Mapping) else {}
     body = _text(record.get("公告正文"))
-    trace_text = _text(trace.get("rawText"))
     title = _text(record.get("公告标题"))
     notice_type = _text(record.get("公告类型")).upper()
+    announcement_type = _text(field_meta.get("source_announcement_type"))
 
     if channel not in config.CHANNELS or section not in config.SECTION_TYPES:
         errors.append(f"无法识别公告子类型 {subtype!r}")
         source_type = ""
         schema_type = ""
     else:
-        source_type = config.source_notice_type(section)
-        schema_type = config.schema_notice_type(section)
+        schema_type = SxjmParser._schema_notice_type(section, title)
+        source_type = (
+            "资格预审公告"
+            if schema_type == "资格预审公告"
+            else SxjmParser.source_notice_nature(
+                channel, section, announcement_type, title
+            )
+            if schema_type == "更正结果公示"
+            else config.source_notice_type(section)
+        )
         if field_meta.get("source_notice_type") != source_type:
             errors.append("fieldMeta.source_notice_type 与栏目不一致")
         if field_meta.get("schema_notice_type") != schema_type:
             errors.append("fieldMeta.schema_notice_type 与公共 Schema 不一致")
 
-    announcement_type = _text(field_meta.get("source_announcement_type"))
     expected_code = SCHEMA_CODES.get(schema_type, "")
     termination = section == "zzgg" or _title_is_termination(title)
-    if termination:
-        expected_code = "TERMINATION"
     if expected_code and notice_type != expected_code:
         errors.append(f"公告类型应为 {expected_code}，实际为 {notice_type or '(空)'}")
 
@@ -78,12 +98,14 @@ def audit_record(record: Mapping[str, Any], file_name: str) -> dict[str, Any]:
         errors.append("公告标题为空")
     if section != "zbjh" and not body:
         errors.append("非招标计划公告正文为空")
-    if body != trace_text:
-        errors.append("公告正文与 _trace.rawText 不一致")
-    if not _text(trace.get("rawHtml")) and section != "zbjh":
-        errors.append("_trace.rawHtml 为空")
+    if output_root is not None and section != "zbjh":
+        try:
+            if not load_record_html(record, output_root):
+                errors.append("HTML快照内容为空")
+        except ValueError as exc:
+            errors.append(str(exc))
     if not detail:
-        errors.append("_trace.payload.detail 为空")
+        errors.append("payload快照中的detail为空")
     if not announcement_type:
         errors.append("缺少请求 announcement_type 溯源")
 
@@ -158,7 +180,7 @@ def audit_output(output_root: Path, expected_per_feed: int) -> dict[str, Any]:
                     "warnings": [],
                 })
                 continue
-            result = audit_record(row, path.name)
+            result = audit_record(row, path.name, output_root)
             results.append(result)
             key = ".".join(
                 (result["subtype"], result.get("announcementType") or "unknown")
